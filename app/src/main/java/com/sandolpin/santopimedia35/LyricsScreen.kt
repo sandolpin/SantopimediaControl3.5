@@ -2,6 +2,7 @@ package com.sandolpin.santopimedia35
 
 import android.content.res.Configuration
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.Crossfade
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
@@ -40,6 +41,7 @@ import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.rememberTextMeasurer
@@ -63,9 +65,14 @@ import com.sandolpin.santopimedia35.home.AnimatedMeshBackground
 import com.sandolpin.santopimedia35.home.AlbumArtCard
 import com.sandolpin.santopimedia35.home.NormalSeekBar
 import com.sandolpin.santopimedia35.home.PlayerControlsA
+import com.sandolpin.santopimedia35.home.BackgroundDecorationLayer
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.unit.constrainHeight
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.first
 
 // ===== LyricsScreen =====
 @Composable
@@ -80,6 +87,32 @@ fun LyricsScreen(
     // ☆=安定モード（offsetなし）、★=offsetアニメモード（デフォルトON）
     var useOffsetAnim by remember { mutableStateOf(true) }
 
+    // ★ 背景装飾（BackgroundDecorationLayer）を歌詞のスクロールに連動させるため、
+    //   SyncedLyricsView内部で使っていたLazyListStateをここに引き上げて共有する。
+    val lyricsListState = rememberLazyListState()
+
+    // ★ 装飾のパララックス量は「歌詞のLazyColumnが実際に消費したスクロールpx」を
+    //   NestedScrollConnectionでそのまま積算して求める。
+    //   以前はfirstVisibleItemIndex×概算の行高さで近似していたが、sdlrcの行は
+    //   改行・間奏・カラオケ行などで高さがバラバラなため、行が切り替わる瞬間に
+    //   推定値と実際のスクロール量がズレて、装飾がガクッと飛んだり
+    //   ほとんど動いていないように見えたりする不具合があった（実際に発生した不具合）。
+    //   NestedScrollConnectionは子(LazyColumn)が実際に消費したpx量をそのまま
+    //   教えてくれるため、行の高さに関わらず正確・滑らかに追従できる。
+    var lyricsScrollAccumPx by remember { mutableStateOf(0f) }
+    val lyricsScrollConnection = remember {
+        object : androidx.compose.ui.input.nestedscroll.NestedScrollConnection {
+            override fun onPostScroll(
+                consumed: androidx.compose.ui.geometry.Offset,
+                available: androidx.compose.ui.geometry.Offset,
+                source: androidx.compose.ui.input.nestedscroll.NestedScrollSource
+            ): androidx.compose.ui.geometry.Offset {
+                lyricsScrollAccumPx += consumed.y
+                return androidx.compose.ui.geometry.Offset.Zero
+            }
+        }
+    }
+
     val accentColor  = mediaState.dominantColor
     // 動的アニメーション背景専用の色ソース（ホーム画面と同じ設定を共有）:
     // "accent"    = このアプリで言う「アクセントカラー」= アルバムアートから抽出した
@@ -92,6 +125,19 @@ fun LyricsScreen(
     val animatedBgColor = when (settings.animatedColorSource) {
         "accent" -> accentColor
         else -> mediaState.blendedArtColor.copy(alpha = 1f)
+    }
+    // ★ HomescreenA.kt/HomescreenC.ktと同じ考え方:
+    //   「アルバムアートのぼかし＋アルバムアートの色」が選ばれている場合、
+    //   ぼかしたアルバムアートを下地に敷いた上で動的アニメーションを半透明で重ねる。
+    val useBlurAlbumArtBase = settings.animatedColorSource == "blur_album_art"
+    // ★ 以前はAnimatedMeshBackground呼び出し時にisDarkTheme/darkness/colorPatternを
+    //   一切渡しておらず、常にデフォルト値（ライトモード相当の濃さ・normalパターン）
+    //   で描画されていた。ダークモード専用スライダーを機能させるため、ここで
+    //   HomeScreenA.kt等と同じ方法でダークモード判定を行う。
+    val isDarkThemeForBg = when (settings.themeMode) {
+        "dark"  -> true
+        "light" -> false
+        else    -> isSystemInDarkTheme()
     }
     // "blur" 直接指定、"animated"（動的アニメーション背景は常に暗め）、
     // または "player" でプレーヤー背景がぼかし/動的アニメーションの場合も白テキスト
@@ -165,7 +211,7 @@ fun LyricsScreen(
     var showManualSearchDialog by remember { mutableStateOf(false) }
 
     Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-        Box(modifier = Modifier.fillMaxSize()) {
+        Box(modifier = Modifier.fillMaxSize().nestedScroll(lyricsScrollConnection)) {
             // ===== 背景 =====
             when (settings.lyricsBg) {
                 "blur" -> {
@@ -188,8 +234,22 @@ fun LyricsScreen(
                     // ホーム画面と同じ動的アニメーション背景（AGSL / API33+）。
                     // API33未満はホームと同じ方針でぼかしにフォールバックする。
                     if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+                        // 「アルバムアートのぼかし＋色」のときは、動的アニメーションの下に
+                        // ぼかしたアルバムアートを先に敷いておく。
+                        if (useBlurAlbumArtBase && mediaState.albumArtUri != null) {
+                            AsyncImage(
+                                model = mediaState.albumArtUri, contentDescription = null,
+                                modifier = Modifier.fillMaxSize().blur(60.dp),
+                                contentScale = ContentScale.Crop
+                            )
+                        }
                         AnimatedMeshBackground(
                             color1 = animatedBgColor,
+                            darkness = settings.animatedBgDarkness,
+                            darkModeDarkness = settings.animatedBgDarknessDark,
+                            colorPattern = settings.animatedColorPattern,
+                            isDarkTheme = isDarkThemeForBg,
+                            alpha = if (useBlurAlbumArtBase) 0.62f else 1f,
                             modifier = Modifier.fillMaxSize()
                         )
                     } else if (mediaState.albumArtUri != null) {
@@ -218,8 +278,20 @@ fun LyricsScreen(
                         ))
                     } else if (settings.backgroundStyle == "animated") {
                         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+                            if (useBlurAlbumArtBase && mediaState.albumArtUri != null) {
+                                AsyncImage(
+                                    model = mediaState.albumArtUri, contentDescription = null,
+                                    modifier = Modifier.fillMaxSize().blur(60.dp),
+                                    contentScale = ContentScale.Crop
+                                )
+                            }
                             AnimatedMeshBackground(
                                 color1 = animatedBgColor,
+                                darkness = settings.animatedBgDarkness,
+                                darkModeDarkness = settings.animatedBgDarknessDark,
+                                colorPattern = settings.animatedColorPattern,
+                                isDarkTheme = isDarkThemeForBg,
+                                alpha = if (useBlurAlbumArtBase) 0.62f else 1f,
                                 modifier = Modifier.fillMaxSize()
                             )
                         } else if (mediaState.albumArtUri != null) {
@@ -239,80 +311,104 @@ fun LyricsScreen(
                 else -> Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background))
             }
 
+            // ===== 背景装飾（ドット/水玉/ランダム図形。どの背景スタイルにも重ねられる独立レイヤー）=====
+            // ★ lyricsScrollAccumPx（NestedScrollConnectionで実測した実際のスクロールpx）を
+            //   そのまま使う。LazyColumnはスクロール量が増えるほど中身が画面上では
+            //   上方向に流れる（次の行が下から上がってくる）が、装飾側の描画は逆に
+            //   scrollOffsetPxが増えるほどY座標を増やす（下に動く）実装のため、
+            //   符号を反転させて歌詞と同じ方向・その35%の量だけ装飾も動くようにする。
+            val decorationScrollOffsetPx = lyricsScrollAccumPx * -0.35f
+
+            if (settings.bgDecorationType != "none") {
+                BackgroundDecorationLayer(
+                    type = settings.bgDecorationType,
+                    color = if (settings.bgDecorationColor == "white") Color.White else accentColor,
+                    opacity = settings.bgDecorationOpacity,
+                    sizeScale = settings.bgDecorationSize,
+                    scrollOffsetPx = decorationScrollOffsetPx,
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
+
             // ===== 歌詞コンテンツ本体（縦画面・横画面で共用するため関数値として抽出） =====
             val lyricsContent: @Composable () -> Unit = {
-                when (val state = lyricsState) {
-                    is LyricsState.Loading -> LoadingView(
-                        onCancel = {
-                            fetchJob?.cancel()
-                            lyricsState = LyricsState.NotFound
-                        },
-                        onSkipApi = {
-                            fetchJob?.cancel()
-                            // この曲はAPI検索しないとしてキャッシュにスキップフラグを保存
-                            LyricsCache.saveSkip(mediaState.title, mediaState.artist)
-                            lyricsState = LyricsState.NotFound
-                        }
-                    )
-                    is LyricsState.Synced -> SyncedLyricsView(
-                        items = state.items,
-                        currentPositionMs = mediaState.currentPositionMs,
-                        accentColor = activeColor,
-                        inactiveColor = inactiveColor,
-                        futureColor = futureColor,
-                        fontSize = settings.lyricsFontSize,
-                        fontWeight = settings.lyricsFontWeight,
-                        lineHeightMultiplier = settings.lyricsLineHeight,
-                        lineSpacingDp = settings.lyricsLineSpacing,
-                        inactiveLight = settings.lyricsInactiveLight,
-                        interludeThresholdMs = settings.lyricsInterludeThreshold * 1000L,
-                        multiLineThresholdMs = (settings.lyricsMultiLineThreshold * 1000f).toLong(),
-                        scrollSpeedMs = settings.lyricsScrollSpeedMs,
-                        scrollEasing = settings.lyricsScrollEasing,
-                        offsetSync = settings.lyricsOffsetSync,
-                        offsetDelayMs = settings.lyricsOffsetDelayMs,
-                        offsetStaggerMs = settings.lyricsOffsetStaggerMs,
-                        inactiveScale = settings.lyricsInactiveScale,
-                        inactiveBlur = settings.lyricsInactiveBlur,
-                        inactiveBlurRadius = settings.lyricsInactiveBlurRadius,
-                        scrollAnimType = settings.lyricsScrollAnimType,
-                        overshootDistance = settings.lyricsOvershootDistance,
-                        fontPath = settings.lyricsFontPath,
-                        forceInactiveOnEnd = settings.lyricsForceInactiveOnEnd,
-                        disableMultiShow   = settings.sdlrcDisableMultiShow,
-                        disableRight       = settings.sdlrcDisableRight,
-                        onLineClick = { viewModel.seekTo(it) },
-                        viewModel = viewModel,
-                        useOffsetAnim = useOffsetAnim
-                    )
-                    is LyricsState.Plain -> PlainLyricsView(
-                        lines = state.lines,
-                        isBlurBg = isBlurBg
-                    )
-                    is LyricsState.NotFound -> NotFoundView(
-                        isBlurBg = isBlurBg,
-                        mediaState = mediaState,
-                        onLyricsLoaded = { loaded -> lyricsState = loaded }
-                    )
-                    is LyricsState.SearchResults -> SearchResultsView(
-                        results = state.results,
-                        isBlurBg = isBlurBg,
-                        onSelect = { id ->
-                            kotlinx.coroutines.MainScope().launch {
-                                lyricsState = LyricsState.Loading
-                                lyricsState = fetchLyricsById(id, mediaState.title, mediaState.artist)
+                // ★ 取得完了などで歌詞の状態が切り替わるたびに、テキストをフェードインさせる。
+                //   （Loading→歌詞表示、NotFound→歌詞表示など。前の表示はフェードアウトする）
+                Crossfade(targetState = lyricsState, animationSpec = tween(500), label = "lyricsFade") { currentState ->
+                    when (val state = currentState) {
+                        is LyricsState.Loading -> LoadingView(
+                            onCancel = {
+                                fetchJob?.cancel()
+                                lyricsState = LyricsState.NotFound
+                            },
+                            onSkipApi = {
+                                fetchJob?.cancel()
+                                // この曲はAPI検索しないとしてキャッシュにスキップフラグを保存
+                                LyricsCache.saveSkip(mediaState.title, mediaState.artist)
+                                lyricsState = LyricsState.NotFound
                             }
-                        },
-                        onDismiss = { lyricsState = LyricsState.NotFound }
-                    )
-                    is LyricsState.Error -> ErrorView(
-                        message = state.message,
-                        isBlurBg = isBlurBg,
-                        mediaState = mediaState,
-                        onLyricsLoaded = { loaded -> lyricsState = loaded }
-                    )
-                    else -> {}
-                }
+                        )
+                        is LyricsState.Synced -> SyncedLyricsView(
+                            items = state.items,
+                            currentPositionMs = mediaState.currentPositionMs,
+                            accentColor = activeColor,
+                            inactiveColor = inactiveColor,
+                            futureColor = futureColor,
+                            fontSize = settings.lyricsFontSize,
+                            fontWeight = settings.lyricsFontWeight,
+                            lineHeightMultiplier = settings.lyricsLineHeight,
+                            lineSpacingDp = settings.lyricsLineSpacing,
+                            inactiveLight = settings.lyricsInactiveLight,
+                            interludeThresholdMs = settings.lyricsInterludeThreshold * 1000L,
+                            multiLineThresholdMs = (settings.lyricsMultiLineThreshold * 1000f).toLong(),
+                            scrollSpeedMs = settings.lyricsScrollSpeedMs,
+                            scrollEasing = settings.lyricsScrollEasing,
+                            offsetSync = settings.lyricsOffsetSync,
+                            offsetDelayMs = settings.lyricsOffsetDelayMs,
+                            offsetStaggerMs = settings.lyricsOffsetStaggerMs,
+                            inactiveScale = settings.lyricsInactiveScale,
+                            inactiveBlur = settings.lyricsInactiveBlur,
+                            inactiveBlurRadius = settings.lyricsInactiveBlurRadius,
+                            scrollAnimType = settings.lyricsScrollAnimType,
+                            overshootDistance = settings.lyricsOvershootDistance,
+                            fontPath = settings.lyricsFontPath,
+                            forceInactiveOnEnd = settings.lyricsForceInactiveOnEnd,
+                            disableMultiShow   = settings.sdlrcDisableMultiShow,
+                            disableRight       = settings.sdlrcDisableRight,
+                            onLineClick = { viewModel.seekTo(it) },
+                            viewModel = viewModel,
+                            useOffsetAnim = useOffsetAnim,
+                            externalListState = lyricsListState
+                        )
+                        is LyricsState.Plain -> PlainLyricsView(
+                            lines = state.lines,
+                            isBlurBg = isBlurBg
+                        )
+                        is LyricsState.NotFound -> NotFoundView(
+                            isBlurBg = isBlurBg,
+                            mediaState = mediaState,
+                            onLyricsLoaded = { loaded -> lyricsState = loaded }
+                        )
+                        is LyricsState.SearchResults -> SearchResultsView(
+                            results = state.results,
+                            isBlurBg = isBlurBg,
+                            onSelect = { id ->
+                                kotlinx.coroutines.MainScope().launch {
+                                    lyricsState = LyricsState.Loading
+                                    lyricsState = fetchLyricsById(id, mediaState.title, mediaState.artist)
+                                }
+                            },
+                            onDismiss = { lyricsState = LyricsState.NotFound }
+                        )
+                        is LyricsState.Error -> ErrorView(
+                            message = state.message,
+                            isBlurBg = isBlurBg,
+                            mediaState = mediaState,
+                            onLyricsLoaded = { loaded -> lyricsState = loaded }
+                        )
+                        else -> {}
+                    }
+                } // Crossfade
             }
 
             // ===== コンテンツ（横画面: 左=プレーヤー/右=歌詞、縦画面: 従来通り上下） =====
@@ -1050,7 +1146,7 @@ private suspend fun scrollWithAnim(
     durationMs: Long = 500L,
     easing: String = "decelerate",
     overshootDistancePercent: Int = 10, // オーバーシュートの行き過ぎ量(%): 3/5/10/15
-    onProgress: (Float) -> Unit = {}
+    onConsumed: (Float) -> Unit = {}
 ): Float {
     if (state.layoutInfo.totalItemsCount == 0) return 0f
     val safeIndex = index.coerceIn(0, state.layoutInfo.totalItemsCount - 1)
@@ -1091,6 +1187,7 @@ private suspend fun scrollWithAnim(
     val totalDiff = calcScrollDiff(state, safeIndex, offsetPx)
     if (kotlin.math.abs(totalDiff) < 2f) return 0f
 
+    var consumedTotal = 0f
     state.scroll(scrollPriority = androidx.compose.foundation.MutatePriority.Default) {
         val startMs = System.currentTimeMillis()
         var prevScrolled = 0f
@@ -1099,8 +1196,9 @@ private suspend fun scrollWithAnim(
             val t = (elapsed.toFloat() / durationMs).coerceIn(0f, 1f)
             val progress = applyEasing(t)
             val scrolled = totalDiff * progress
-            scrollBy(scrolled - prevScrolled)
-            onProgress(progress)
+            val consumed = scrollBy(scrolled - prevScrolled)
+            consumedTotal += consumed
+            onConsumed(consumedTotal)
             prevScrolled = scrolled
             if (t >= 1f) break
             kotlinx.coroutines.delay(16)
@@ -1140,7 +1238,12 @@ fun SyncedLyricsView(
     disableRight: Boolean = false,      // sdlrc右寄せを無効化
     onLineClick: (Long) -> Unit,
     viewModel: MediaPlayerViewModel,
-    useOffsetAnim: Boolean = true
+    useOffsetAnim: Boolean = true,
+    // ★ 歌詞画面(LyricsScreen.kt)で、歌詞のスクロール量から背景装飾のパララックス量を
+    //   計算するために、LazyListStateを外側から受け取れるようにする。
+    //   nullの場合（HomeScreenCの簡易表示・設定画面のプレビュー等）は従来通り
+    //   内部で新しく生成する。
+    externalListState: androidx.compose.foundation.lazy.LazyListState? = null
 ) {
     // currentIndex: 現在再生位置に対応するアクティブ行のインデックス
     // 「timeMs <= currentPositionMs」を満たす行のうち最後のもの
@@ -1223,38 +1326,26 @@ fun SyncedLyricsView(
     //   変わるまでそのSetをそのまま保持する。currentPositionMsの経過では
     //   再計算しないため、後から時間経過で新しい行が巻き込まれることもなく、
     //   かつ「先に終わった行がendMs到達で消えない」という目的も両立できる。
-    var multiShowIndices by remember { mutableStateOf(setOf<Int>()) }
-    LaunchedEffect(currentIndex) {
+    val multiShowIndices = remember(currentIndex, items) {
         if (!isSdlrc || effectiveDisableMultiShow ||
             currentIndex < 0 || currentIndex >= items.size) {
-            multiShowIndices = emptySet()
-            return@LaunchedEffect
-        }
-        val currentLine = items[currentIndex]
-        if (currentLine !is LyricItem.Line || currentLine.endMs == -1L) {
-            multiShowIndices = emptySet()
-            return@LaunchedEffect
-        }
-
-        // currentIndexに切り替わった「今」の再生位置を使い、
-        // その瞬間に currentLine の時間範囲内で実際に発声中の行だけを収集する。
-        val nowMs = currentPositionMs
-        val result = mutableSetOf<Int>()
-        for (i in items.indices) {
-            if (i == currentIndex) continue
-            val item = items[i]
-            if (item is LyricItem.Line &&
-                item.endMs != -1L &&
-                nowMs >= item.timeMs &&
-                nowMs < item.endMs &&
-                item.timeMs < currentLine.endMs) {
-                result.add(i)
+            emptySet()
+        } else {
+            val currentLine = items[currentIndex] as? LyricItem.Line
+            if (currentLine == null || currentLine.endMs == -1L) emptySet()
+            else {
+                // インデックスが切り替わった時点で重なっている行を固定する。
+                items.indices.filterTo(mutableSetOf()) { i ->
+                    if (i == currentIndex) return@filterTo false
+                    val item = items[i] as? LyricItem.Line ?: return@filterTo false
+                    item.endMs != -1L && currentPositionMs >= item.timeMs &&
+                            currentPositionMs < item.endMs && item.timeMs < currentLine.endMs
+                }
             }
         }
-        multiShowIndices = result
     }
 
-    val listState = rememberLazyListState()
+    val listState = externalListState ?: rememberLazyListState()
     val coroutineScope = rememberCoroutineScope()
     val density = androidx.compose.ui.platform.LocalDensity.current
 
@@ -1263,16 +1354,13 @@ fun SyncedLyricsView(
     var prevMultiShowIndices by remember { mutableStateOf(setOf<Int>()) }
 
     // ===== offsetアニメ用 =====
-    // scrollDiffPx: 今回のスクロールで実際に動く量(px)。
-    //   1行スクロールなら小さく、2行以上なら大きくなる。
-    //   isFuture行の translationY 初期値としてこの値を使うことで
-    //   「スクロール量に比例した自然なスライドイン」になる。
-    // scrollDiffForAnim: animateFloatAsState で滑らかに変化させるためのState。
-    //   これを各行の LaunchedEffect のキーにすることで高さ変化もアニメーションする。
-    var scrollDiffPx by remember { mutableStateOf(0f) }
-    // 実スクロールの進捗。各行がこの量だけ一時的に相殺してから、
-    // stagger 順に相殺を解除する。
-    var scrollProgress by remember { mutableStateOf(0f) }
+    // scrollTargetDiffPx は予定量、scrollDiffPx はLazyColumnが実際に消費した量。
+    // リスト先頭では予定した上方向スクロールが境界で消費されず、予定量だけを
+    // offsetに使うと歌詞だけが動いて見えるため、描画には実消費量を使う。
+    var scrollTargetDiffPx by remember(items) { mutableStateOf(0f) }
+    var scrollDiffPx by remember(items) { mutableStateOf(0f) }
+    var offsetCycle by remember(items) { mutableIntStateOf(0) }
+    var hasInitialAlignment by remember(items) { mutableStateOf(false) }
 
     // ===== 手動スクロール検知・ぼかし抑制 =====
     // isUserScrolling は「手を離した瞬間にfalse」になるため、
@@ -1338,8 +1426,23 @@ fun SyncedLyricsView(
         isAutoScrolling = false
     }
 
-    LaunchedEffect(currentIndex) {
-        if (currentIndex < 0) return@LaunchedEffect
+    LaunchedEffect(currentIndex, items) {
+        if (currentIndex < 0) {
+            // 歌い終わりに currentIndex が -1 へ移る際、前回のスクロール量を
+            // 残すと全行が future 扱いになり、歌詞が上へ流れてしまう。
+            scrollDiffPx = 0f
+            scrollTargetDiffPx = 0f
+            offsetCycle++
+            return@LaunchedEffect
+        }
+
+        // 初回は LazyColumn の測定前に LaunchedEffect が走ることがある。
+        // 実際の表示領域が決まってから初期位置を合わせる。
+        snapshotFlow {
+            listState.layoutInfo.totalItemsCount > 0 &&
+                    listState.layoutInfo.viewportSize.height > 0 &&
+                    listState.layoutInfo.visibleItemsInfo.isNotEmpty()
+        }.first { it }
 
         val wasMulti = prevMultiShowIndices.isNotEmpty()
         val isMultiNow = multiShowIndices.isNotEmpty()
@@ -1366,9 +1469,21 @@ fun SyncedLyricsView(
             else        -> currentIndex     // 通常: currentIndexへ
         }
 
+        if (!hasInitialAlignment) {
+            listState.scrollToItem(target, -topOffset)
+            hasInitialAlignment = true
+            prevMultiShowIndices = multiShowIndices
+            prevIndex = currentIndex
+            scrollDiffPx = 0f
+            scrollTargetDiffPx = 0f
+            offsetCycle++
+            return@LaunchedEffect
+        }
+
         val diff = if (currentIndex > 0) calcScrollDiff(listState, target, topOffset) else 0f
-        scrollDiffPx = diff
-        scrollProgress = 0f
+        scrollTargetDiffPx = if (kotlin.math.abs(diff) >= 2f) diff else 0f
+        scrollDiffPx = 0f
+        offsetCycle++
 
         val resolvedEasing = scrollAnimType
 
@@ -1381,7 +1496,7 @@ fun SyncedLyricsView(
                     scrollWithAnim(listState, target, topOffset,
                         durationMs = scrollSpeedMs.toLong(), easing = resolvedEasing,
                         overshootDistancePercent = overshootDistance,
-                        onProgress = { scrollProgress = it })
+                        onConsumed = { scrollDiffPx = it })
                 } finally {
                     isAutoScrolling = false
                 }
@@ -1450,7 +1565,7 @@ fun SyncedLyricsView(
                         val isPast   = currentIndex >= 0 && (index < currentIndex || (index == currentIndex && isDuringInterlude)) && !isMulti
 
                         val isFuture = index > currentIndex && !isMulti
-                        val isAnimTarget = isActive || isMulti || isPast || isFuture
+                        val isAnimTarget = currentIndex >= 0 && (isActive || isMulti || isPast || isFuture)
 
                         // distFromActive: ぼかし強度の自動計算用（Composableスコープで算出）
                         val distFromActive = when {
@@ -1476,13 +1591,13 @@ fun SyncedLyricsView(
                         // scrollDirection は var mutableStateOf のため再コンポーズ前の値を
                         // キャプチャしてしまう。
                         // snapshotFlow で State の最新値をコルーチン内で確実に読む。
-                        LaunchedEffect(currentIndex) {
+                        LaunchedEffect(offsetCycle, currentIndex, multiShowIndices) {
                             if (!useOffsetAnim || !isAnimTarget) {
                                 releaseAnim.snapTo(1f)
                                 return@LaunchedEffect
                             }
 
-                            val rawOffset = kotlin.math.abs(scrollDiffPx).coerceIn(0f, maxOffsetPx)
+                            val rawOffset = kotlin.math.abs(scrollTargetDiffPx).coerceIn(0f, maxOffsetPx)
                             if (rawOffset == 0f) {
                                 releaseAnim.snapTo(1f)
                                 return@LaunchedEffect
@@ -1490,9 +1605,12 @@ fun SyncedLyricsView(
 
                             // LaunchedEffect 内で scrollDirection・行位置を再評価
                             val fwd = scrollDirection >= 0
-                            val thisIsActive = index == currentIndex || isMulti
-                            val thisIsFuture = index > currentIndex && !isMulti
-                            val thisIsPast   = index < currentIndex && !isMulti
+                            val activeGroup = multiShowIndices + currentIndex
+                            val firstActiveIndex = activeGroup.minOrNull() ?: currentIndex
+                            val lastActiveIndex = activeGroup.maxOrNull() ?: currentIndex
+                            val thisIsActive = activeGroup.contains(index)
+                            val thisIsFuture = index > lastActiveIndex
+                            val thisIsPast   = index < firstActiveIndex
 
                             // 前進時の過去行は、画面外から遅れて compose されることがある。
                             // その時点で offset を始めると、アクティブ行の上で後追いの
@@ -1511,8 +1629,8 @@ fun SyncedLyricsView(
                             //   active      = 50ms
                             //   future      = 100ms + stagger
                             val thisDist = when {
-                                thisIsFuture -> (index - currentIndex).coerceAtLeast(0)
-                                thisIsPast   -> (currentIndex - index).coerceAtLeast(0)
+                                thisIsFuture -> (index - lastActiveIndex).coerceAtLeast(0)
+                                thisIsPast   -> (firstActiveIndex - index).coerceAtLeast(0)
                                 else         -> 0
                             }
                             val baseDelayMs = offsetDelayMs.toLong()
@@ -1542,14 +1660,17 @@ fun SyncedLyricsView(
                                 )
                             )
                         }
-                        val scrolledPx = scrollDiffPx * scrollProgress
-                        val cappedScrolledPx = when {
-                            scrolledPx > 0f -> scrolledPx.coerceAtMost(maxOffsetPx)
-                            else -> scrolledPx.coerceAtLeast(-maxOffsetPx)
+                        // 毎フレーム変わる実スクロール量とreleaseAnimはgraphicsLayer内で読む。
+                        // LazyColumnの行コンポーズを毎フレーム再実行せず、描画位置だけ更新する。
+                        val rowTranslationYProvider: () -> Float = {
+                            if (useOffsetAnim && isAnimTarget) {
+                                val scrolledPx = scrollDiffPx
+                                val cappedScrolledPx = if (scrolledPx > 0f)
+                                    scrolledPx.coerceAtMost(maxOffsetPx)
+                                else scrolledPx.coerceAtLeast(-maxOffsetPx)
+                                cappedScrolledPx * (1f - releaseAnim.value)
+                            } else 0f
                         }
-                        val rowTranslationY = if (useOffsetAnim && isAnimTarget) {
-                            cappedScrolledPx * (1f - releaseAnim.value)
-                        } else 0f
 
                         if (item.isKaraoke) {
                             // ===== カラオケ行: ワイプアニメーション =====
@@ -1566,7 +1687,7 @@ fun SyncedLyricsView(
                                 lineHeightMultiplier = lineHeightMultiplier,
                                 inactiveScale = inactiveScale,
                                 fontFamily = customFontFamily,
-                                translationY = rowTranslationY,
+                                translationYProvider = rowTranslationYProvider,
                                 isRight = if (disableRight) false else item.isRight,
                                 lineWidthFraction = lyricLineWidth,
                                 onClick = {
@@ -1594,7 +1715,7 @@ fun SyncedLyricsView(
                                 inactiveBlurRadius = inactiveBlurRadius,
                                 distFromActive = distFromActive,
                                 fontFamily = customFontFamily,
-                                translationY = rowTranslationY,
+                                translationYProvider = rowTranslationYProvider,
                                 isRight = if (disableRight) false else item.isRight,
                                 lineWidthFraction = lyricLineWidth,
                                 onClick = {
@@ -1665,6 +1786,7 @@ fun LyricLineItem(
     translationY: Float = 0f,           // graphicsLayer translationY (px)
     isRight: Boolean = false,
     lineWidthFraction: Float = 0.85f,   // テキスト幅の割合 (isRight行なし→0.95f)
+    translationYProvider: (() -> Float)? = null,
     onClick: () -> Unit
 ) {
     val resolvedInactive = if (inactiveColor == Color.Unspecified)
@@ -1719,7 +1841,7 @@ fun LyricLineItem(
         modifier = Modifier
             .fillMaxWidth()
             .graphicsLayer {
-                this.translationY = translationY
+                this.translationY = translationYProvider?.invoke() ?: translationY
                 // 非アクティブ時のスケール（左端/右端基準）
                 scaleX = targetScale
                 scaleY = targetScale
@@ -1777,6 +1899,7 @@ fun KaraokeLineItem(
     translationY: Float = 0f,
     isRight: Boolean = false,
     lineWidthFraction: Float = 0.85f,   // テキスト幅の割合 (isRight行なし→0.95f)
+    translationYProvider: (() -> Float)? = null,
     onClick: () -> Unit
 ) {
     // ===== 滑らかなワイプのための時間補間 =====
@@ -1831,23 +1954,11 @@ fun KaraokeLineItem(
         label = "karaokeBaseColor"
     )
 
-    // 各文字のワイプ進捗（0.0=未到達、1.0=完全ワイプ済み）
-    // interpolatedPositionMs（毎フレーム滑らかに進む推定位置）を使うことで
-    // 文字送りのワイプが飛び飛びにならずなめらかに動く
-    val wipeProgresses = karaoke.map { k ->
-        when {
-            interpolatedPositionMs < k.startMs -> 0f
-            k.endMs > k.startMs && interpolatedPositionMs < k.endMs ->
-                (interpolatedPositionMs - k.startMs).toFloat() / (k.endMs - k.startMs).toFloat()
-            else -> if (isPast || interpolatedPositionMs >= k.endMs) 1f else 0f
-        }
-    }
-
     Box(
         modifier = Modifier
             .fillMaxWidth()
             .graphicsLayer {
-                this.translationY = translationY
+                this.translationY = translationYProvider?.invoke() ?: translationY
                 scaleX = targetScale
                 scaleY = targetScale
                 transformOrigin = if (isRight)
@@ -1911,7 +2022,16 @@ fun KaraokeLineItem(
                         style = textStyle
                     )
                     val charWidth = charLayout.size.width.toFloat()
-                    val wipeWidth = charWidth * wipeProgresses[i]
+                    // 現在位置はフレームごとに更新されるため、進捗計算もCompositionではなく
+                    // Canvas描画時に行い、歌詞行全体の再コンポーズを避ける。
+                    val wipeProgress = when {
+                        interpolatedPositionMs < k.startMs -> 0f
+                        k.endMs > k.startMs && interpolatedPositionMs < k.endMs ->
+                            (interpolatedPositionMs - k.startMs).toFloat() /
+                                    (k.endMs - k.startMs).toFloat()
+                        else -> if (isPast || interpolatedPositionMs >= k.endMs) 1f else 0f
+                    }
+                    val wipeWidth = charWidth * wipeProgress
 
                     if (wipeWidth > 0f) {
                         drawContext.canvas.save()
@@ -1943,14 +2063,13 @@ fun KaraokeLineItem(
 // アニメーションシーケンス:
 // 【出現】枠を開く(height 0→54dp) → 各ドットが stagger で小さく→大きくポップイン →
 //         パルスループ: 全体100%→115%→100% を繰り返す
-// 【消滅】残り800ms以下: 全体を130%に拡大 → 300ms待機 → 0%に縮小（ここがしっかり見えるようにしてから）→ フェードアウト＋枠を閉じる(height→0dp)
-// 【isActive=false】拡大→縮小消滅が未実行なら即フェードアウト
+// 【消滅】全体を130%に拡大 → 0%への縮小・フェードアウトと同時に枠を約700msで閉じる
 //
 // ★ 実装メモ: 以前は「常に最大高さ(54dp)の枠を確保した上で中身をscaleYだけ変形する」
 //   方式だった。scaleYはあくまで描画の見た目を縮小するだけでレイアウト上の占有スペースは
 //   変わらないため、間奏が無いときも常に54dp分の余白がそのまま残ってしまう不具合があった。
-//   今回は heightScale の値をそのまま実際の Modifier.height() に反映させ、
-//   間奏が無いときは高さ0dp（余白なし）、出現時は0dp→54dpへなめらかにアニメーションしながら
+//   heightScaleをレイアウト高さに反映し、間奏が無いときは高さ0dp（余白なし）、
+//   出現時は0dp→54dpへなめらかにアニメーションしながら
 //   実際にスペースが開くようにする。LazyColumn側の再計算は発生するが、
 //   heightScaleの変化はtweenで滑らかに補間されるため、周囲の行も一緒になめらかに
 //   詰まる/広がる動きになる。
@@ -1971,41 +2090,82 @@ fun InterludeIndicator(
     val dotScales     = remember { List(dotCount) { Animatable(0f) } }
     // heightScale: 0f=高さ0dp（余白なし）、1f=高さmaxHeightDp（枠を全開にした状態）
     val heightScale   = remember { Animatable(0f) }
-    // クリック領域を残さないための無効化フラグ（レイアウトからは外さない）
+    // クリック領域を残さないための無効化フラグ
     var isCollapsed by remember { mutableStateOf(true) }
+    var hasEntered by remember { mutableStateOf(false) }
+    var exitStartedForActive by remember { mutableStateOf(false) }
+    var pulseJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
 
     // remainingMsをSnapshotStateとして持つ（snapshotFlow で監視するため）
     val remainingMsState = rememberUpdatedState(remainingMs)
 
     val scope = rememberCoroutineScope()
+    val naturalDeceleration = CubicBezierEasing(0f, 0f, 0.2f, 1f)
+
+    // isActive が false になって親の LaunchedEffect が再起動しても、終了演出は
+    // CompositionScopeで最後まで実行する。縮小と穴閉じは同時に進める。
+    val startExitSequence: () -> Unit = {
+        if (hasEntered && !exitStartedForActive) {
+            exitStartedForActive = true
+            isCollapsed = true
+            pulseJob?.cancel()
+            scope.launch {
+                pulseScale.stop()
+                pulseScale.animateTo(1.30f, tween(450, easing = naturalDeceleration))
+                delay(180)
+                coroutineScope {
+                    launch {
+                        pulseScale.animateTo(0f, tween(700, easing = naturalDeceleration))
+                    }
+                    launch {
+                        alpha.animateTo(0f, tween(700, easing = naturalDeceleration))
+                    }
+                    launch {
+                        heightScale.animateTo(0f, tween(700, easing = naturalDeceleration))
+                    }
+                }
+                hasEntered = false
+            }
+        }
+    }
 
     LaunchedEffect(isActive) {
         if (isActive) {
             // ===== リセット =====
+            hasEntered = true
+            exitStartedForActive = false
+            pulseJob?.cancel()
+            pulseJob = null
             isCollapsed = false
             alpha.snapTo(0f)
             pulseScale.snapTo(1.0f)
             dotScales.forEach { it.snapTo(0f) }
             heightScale.snapTo(0f)
 
-            // ===== 1. 枠を開く（0dp→maxHeightDpへ実際にレイアウト高さをアニメーション）=====
-            heightScale.animateTo(1f, tween(350, easing = FastOutSlowInEasing))
-
-            // ===== 2. ドットを stagger でポップイン =====
-            alpha.animateTo(1f, tween(200))
-            dotScales.forEachIndexed { i, anim ->
-                scope.launch {
-                    delay(i * 80L)
-                    anim.animateTo(1.3f, tween(220, easing = FastOutSlowInEasing))
-                    anim.animateTo(1.0f, tween(160, easing = FastOutSlowInEasing))
+            // ===== 1. 枠を開き始め、400ms後にドットを出す =====
+            coroutineScope {
+                val openingJob = launch {
+                    heightScale.animateTo(1f, tween(700, easing = naturalDeceleration))
                 }
+                delay(400)
+
+                // ===== 2. ドットを stagger でポップイン =====
+                alpha.animateTo(1f, tween(200))
+                dotScales.forEachIndexed { i, anim ->
+                    launch {
+                        delay(i * 80L)
+                        anim.animateTo(1.3f, tween(220, easing = FastOutSlowInEasing))
+                        anim.animateTo(1.0f, tween(160, easing = FastOutSlowInEasing))
+                    }
+                }
+                delay(dotCount * 80L + 380L)
+                openingJob.join()
             }
-            delay(dotCount * 80L + 380L)
 
             // ===== 3. パルスループ + 消滅監視 =====
             // snapshotFlow で remainingMs を監視しながらループ
             // 800ms 以下になったら消滅シーケンスへ
-            val pulseJob = scope.launch {
+            pulseJob = scope.launch {
                 while (true) {
                     pulseScale.animateTo(1.15f, tween(1400, easing = FastOutSlowInEasing))
                     delay(600)
@@ -2017,36 +2177,15 @@ fun InterludeIndicator(
             // remainingMs が 800ms 以下になるまで待つ
             snapshotFlow { remainingMsState.value }
                 .collect { ms ->
-                    if (ms in 1L..800L) {
-                        // 消滅シーケンス開始
-                        pulseJob.cancel()
-                        pulseScale.stop()
-                        isCollapsed = true
-
-                        // 130% に拡大(700ms) → 300ms待機 → 0% に縮小(300ms)
-                        // ★ 縮小(pulseScale→0)がしっかり見えるよう、
-                        //   枠を閉じるアニメ(heightScale)は縮小完了後に開始する（直列化）。
-                        //   以前は縮小と同時に枠も閉じていたため、縮小の動きが
-                        //   枠が消える勢いに埋もれてほぼ見えなかった。
-                        pulseScale.animateTo(1.30f, tween(700, easing = FastOutSlowInEasing))
-                        delay(300)
-                        pulseScale.animateTo(0f, tween(300, easing = androidx.compose.animation.core.LinearEasing))
-
-                        // 縮小が見えきってから、フェードアウト＋枠を閉じる
-                        scope.launch { alpha.animateTo(0f, tween(300)) }
-                        heightScale.animateTo(0f, tween(300, easing = FastOutSlowInEasing))
-
-                        // collect を終了
-                        throw kotlinx.coroutines.CancellationException("dismiss done")
-                    }
+                    if (ms in 0L..800L) startExitSequence()
                 }
         } else {
-            // isActive=false: 消滅アニメ未実行なら即フェードアウト
-            isCollapsed = true
-            if (alpha.value > 0f) {
-                pulseScale.stop()
-                scope.launch { alpha.animateTo(0f, tween(250)) }
-                heightScale.animateTo(0f, tween(350))
+            // 残り800msの通知を取りこぼしても、isActive=falseで同じ終了演出を開始。
+            if (hasEntered) {
+                startExitSequence()
+            } else {
+                isCollapsed = true
+                pulseJob?.cancel()
             }
         }
     }
@@ -2054,15 +2193,25 @@ fun InterludeIndicator(
     // ★ isCollapsed による早期return は行わず、常にコンポーズし続ける。
     //   （if分岐でコンポーザブル自体をLazyColumnから抜き差しすると、間奏終了の瞬間に
     //   フェードアウト・縮小アニメーションが実行される前に強制終了してしまうため）
-    //   ただし高さ自体は heightScale に応じて 0dp〜maxHeightDp まで実際にアニメーションさせる。
+    //   高さ自体はheightScaleに応じて0dp〜maxHeightDpまで実際にアニメーションさせる。
     //   → 間奏が無い間は高さ0dpとなり、余白は一切表示されない。
     //   → 間奏が始まると0dpからなめらかに広がり、終わるとなめらかに0dpへ戻る。
-    val animatedHeightDp = (maxHeightDp * heightScale.value.coerceIn(0f, 1f)).dp
-
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .height(animatedHeightDp)
+            .layout { measurable, constraints ->
+                // heightScaleは測定時に読む。毎フレームの高さ変化でコンポーズ全体を
+                // 再実行せず、レイアウトだけを更新して間奏の開閉を軽くする。
+                val heightPx = constraints.constrainHeight(
+                    (maxHeightDp * heightScale.value.coerceIn(0f, 1f)).dp.roundToPx()
+                )
+                val placeable = measurable.measure(
+                    constraints.copy(minHeight = heightPx, maxHeight = heightPx)
+                )
+                layout(constraints.maxWidth, heightPx) {
+                    placeable.placeRelative(0, 0)
+                }
+            }
             .clickable(enabled = !isCollapsed) { onClick() },
         contentAlignment = if (isRight) Alignment.CenterEnd else Alignment.CenterStart
     ) {

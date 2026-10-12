@@ -125,6 +125,21 @@ fun HomeScreenC(
         // 画面全体（余白・区切り線のすき間も含む）の下地として敷く。
         HomeScreenCBackground(mediaState = mediaState, settings = settings)
 
+        // ===== 背景装飾（ドット/水玉/ランダム図形。どの背景スタイルにも重ねられる独立レイヤー）=====
+        // ★ BackgroundDecorationLayerはHomescreenA.ktに定義されているが、
+        //   同じパッケージ(com.sandolpin.santopimedia35.home)のためimport不要で使える。
+        if (settings.bgDecorationType != "none") {
+            val decorAccentColor = if (settings.extractColorFromArt)
+                mediaState.dominantColor.copy(alpha = 1f) else MaterialTheme.colorScheme.primary
+            BackgroundDecorationLayer(
+                type = settings.bgDecorationType,
+                color = if (settings.bgDecorationColor == "white") Color.White else decorAccentColor,
+                opacity = settings.bgDecorationOpacity,
+                sizeScale = settings.bgDecorationSize,
+                modifier = Modifier.fillMaxSize()
+            )
+        }
+
         // ===== タップ漏れ防止用の透明ブロッカー =====
         // ★ このComposable自体はPlayerScreenWithSwipe（MainActivity.kt）側で
         //   QueueScreenBody（背後のキュー画面）と重なるように配置されている。
@@ -266,6 +281,10 @@ private fun HomeScreenCBackground(mediaState: MediaState, settings: AppSettings)
     val isAnimated = settings.backgroundStyle == "animated"
     val useAgsl = isAnimated && android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU
     val useAnimatedFallback = isAnimated && !useAgsl // API<33 → ぼかしにフォールバック
+    // ★ HomescreenA.ktと同じ考え方: 動的アニメーションの色ルールで
+    //   「アルバムアートのぼかし＋アルバムアートの色」を選んだ場合、
+    //   ぼかしたアルバムアートを下地に敷いた上で動的アニメーションを半透明で重ねる。
+    val useBlurAlbumArtBase = isAnimated && settings.animatedColorSource == "blur_album_art"
 
     val isDark = when (settings.themeMode) {
         "dark"  -> true
@@ -278,24 +297,29 @@ private fun HomeScreenCBackground(mediaState: MediaState, settings: AppSettings)
         else -> MaterialTheme.colorScheme.primary
     }
     val animatedBgColor = when (settings.animatedColorSource) {
-        "album_art" -> mediaState.blendedArtColor.copy(alpha = 1f)
+        "album_art", "blur_album_art" -> mediaState.blendedArtColor.copy(alpha = 1f)
         else -> rawAccentColor
     }
 
-    if ((isBlur || useAnimatedFallback) && mediaState.albumArtUri != null) {
+    val showBlurBase = isBlur || useAnimatedFallback || (useAgsl && useBlurAlbumArtBase)
+    if (showBlurBase && mediaState.albumArtUri != null) {
         AsyncImage(
             model = mediaState.albumArtUri,
             contentDescription = null,
             modifier = Modifier.fillMaxSize().blur(60.dp),
             contentScale = ContentScale.Crop
         )
-        when (settings.blurStyle) {
-            "dark_mode" -> Box(
-                modifier = Modifier.fillMaxSize().background(
-                    if (isDark) Color.Black.copy(alpha = 0.60f) else Color.White.copy(alpha = 0.60f)
+        // ★ オーバーレイは「ぼかし」スタイル本来の設定のため、isBlurのときだけ適用する
+        //   （blur_album_artでは上に乗る動的アニメーションの色をそのまま見せる）。
+        if (isBlur) {
+            when (settings.blurStyle) {
+                "dark_mode" -> Box(
+                    modifier = Modifier.fillMaxSize().background(
+                        if (isDark) Color.Black.copy(alpha = 0.60f) else Color.White.copy(alpha = 0.60f)
+                    )
                 )
-            )
-            else -> { /* normal: オーバーレイなし */ }
+                else -> { /* normal: オーバーレイなし */ }
+            }
         }
     }
 
@@ -303,8 +327,10 @@ private fun HomeScreenCBackground(mediaState: MediaState, settings: AppSettings)
         AnimatedMeshBackground(
             color1 = animatedBgColor,
             darkness = settings.animatedBgDarkness,
+            darkModeDarkness = settings.animatedBgDarknessDark,
             colorPattern = settings.animatedColorPattern,
             isDarkTheme = isDark,
+            alpha = if (useBlurAlbumArtBase) 0.62f else 1f,
             modifier = Modifier.fillMaxSize()
         )
     }

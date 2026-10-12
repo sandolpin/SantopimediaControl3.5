@@ -145,6 +145,18 @@ data class AppSettings(
     val homeIconOpacity: Float = 1.0f,  // ホーム画面（プレーヤー）のコントロールアイコンの不透明度 0.5〜1.0
     val navBarSizeLevel: Int = 3,        // ナビゲーションバー（下部ピル）全体の大きさ 1(小)〜5(大)
     val navBarButtonSpacing: Int = 10,   // ナビゲーションバーのボタン間隔(dp) 2〜20
+
+    // 動的アニメーション背景: ダークモード専用の濃さ
+    // ★ animatedBgDarkness(ライトモード用)とは別に、ダークモード時はこちらの値を使う。
+    //   以前は isDarkTheme のとき常に darkness*0.75 という固定倍率で自動的に暗くしていたが、
+    //   ユーザーが明示的に調整できるよう、ダークモード専用のスライダーとして独立させた。
+    val animatedBgDarknessDark: Float = 0.65f, // ダークモード時の背景の色の濃さ 0.25〜1.0
+
+    // 背景装飾（どの背景スタイルにも重ねて表示できる独立レイヤー）
+    val bgDecorationType: String = "none",     // "none" / "dot_gradient" / "polka_dot" / "random_shapes"
+    val bgDecorationColor: String = "accent",  // "accent"=アクセントカラー / "white"=白固定
+    val bgDecorationOpacity: Float = 0.35f,    // 装飾の不透明度 0.1〜1.0
+    val bgDecorationSize: Float = 1.0f,        // 装飾の大きさ倍率 0.5〜2.0
 )
 
 // ===== DataStore キー定義 =====
@@ -241,6 +253,11 @@ object SettingsKeys {
     val HOME_ICON_OPACITY = floatPreferencesKey("home_icon_opacity")
     val NAV_BAR_SIZE_LEVEL = intPreferencesKey("nav_bar_size_level")
     val NAV_BAR_BUTTON_SPACING = intPreferencesKey("nav_bar_button_spacing")
+    val ANIMATED_BG_DARKNESS_DARK = floatPreferencesKey("animated_bg_darkness_dark")
+    val BG_DECORATION_TYPE = stringPreferencesKey("bg_decoration_type")
+    val BG_DECORATION_COLOR = stringPreferencesKey("bg_decoration_color")
+    val BG_DECORATION_OPACITY = floatPreferencesKey("bg_decoration_opacity")
+    val BG_DECORATION_SIZE = floatPreferencesKey("bg_decoration_size")
 }
 
 // ===== SettingsRepository =====
@@ -341,6 +358,11 @@ class SettingsRepository(private val context: Context) {
             homeIconOpacity = prefs[SettingsKeys.HOME_ICON_OPACITY] ?: 1.0f,
             navBarSizeLevel = prefs[SettingsKeys.NAV_BAR_SIZE_LEVEL] ?: 3,
             navBarButtonSpacing = prefs[SettingsKeys.NAV_BAR_BUTTON_SPACING] ?: 10,
+            animatedBgDarknessDark = prefs[SettingsKeys.ANIMATED_BG_DARKNESS_DARK] ?: 0.65f,
+            bgDecorationType = prefs[SettingsKeys.BG_DECORATION_TYPE] ?: "none",
+            bgDecorationColor = prefs[SettingsKeys.BG_DECORATION_COLOR] ?: "accent",
+            bgDecorationOpacity = prefs[SettingsKeys.BG_DECORATION_OPACITY] ?: 0.35f,
+            bgDecorationSize = prefs[SettingsKeys.BG_DECORATION_SIZE] ?: 1.0f,
         )
     }
 
@@ -533,6 +555,13 @@ object SettingsBackup {
         o.put("navBarSizeLevel", s.navBarSizeLevel)
         o.put("navBarButtonSpacing", s.navBarButtonSpacing)
 
+        // 動的アニメーション ダークモード濃さ・背景装飾
+        o.putFloat("animatedBgDarknessDark", s.animatedBgDarknessDark)
+        o.put("bgDecorationType", s.bgDecorationType)
+        o.put("bgDecorationColor", s.bgDecorationColor)
+        o.putFloat("bgDecorationOpacity", s.bgDecorationOpacity)
+        o.putFloat("bgDecorationSize", s.bgDecorationSize)
+
         return o.toString(2)
     }
 
@@ -651,6 +680,12 @@ object SettingsBackup {
             homeIconOpacity = o.floatOrDefault("homeIconOpacity", base.homeIconOpacity),
             navBarSizeLevel = o.intOrDefault("navBarSizeLevel", base.navBarSizeLevel),
             navBarButtonSpacing = o.intOrDefault("navBarButtonSpacing", base.navBarButtonSpacing),
+
+            animatedBgDarknessDark = o.floatOrDefault("animatedBgDarknessDark", base.animatedBgDarknessDark),
+            bgDecorationType = o.stringOrDefault("bgDecorationType", base.bgDecorationType),
+            bgDecorationColor = o.stringOrDefault("bgDecorationColor", base.bgDecorationColor),
+            bgDecorationOpacity = o.floatOrDefault("bgDecorationOpacity", base.bgDecorationOpacity),
+            bgDecorationSize = o.floatOrDefault("bgDecorationSize", base.bgDecorationSize),
         )
     }
 
@@ -748,6 +783,11 @@ object SettingsBackup {
         prefs[SettingsKeys.HOME_ICON_OPACITY] = s.homeIconOpacity
         prefs[SettingsKeys.NAV_BAR_SIZE_LEVEL] = s.navBarSizeLevel
         prefs[SettingsKeys.NAV_BAR_BUTTON_SPACING] = s.navBarButtonSpacing
+        prefs[SettingsKeys.ANIMATED_BG_DARKNESS_DARK] = s.animatedBgDarknessDark
+        prefs[SettingsKeys.BG_DECORATION_TYPE] = s.bgDecorationType
+        prefs[SettingsKeys.BG_DECORATION_COLOR] = s.bgDecorationColor
+        prefs[SettingsKeys.BG_DECORATION_OPACITY] = s.bgDecorationOpacity
+        prefs[SettingsKeys.BG_DECORATION_SIZE] = s.bgDecorationSize
     }
 }
 

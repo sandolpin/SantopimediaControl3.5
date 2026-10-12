@@ -85,6 +85,7 @@ import androidx.navigation.compose.rememberNavController
 import com.sandolpin.santopimedia35.home.HomeScreenA
 import com.sandolpin.santopimedia35.home.HomeScreenB
 import com.sandolpin.santopimedia35.home.HomeScreenC
+import com.sandolpin.santopimedia35.home.HomeScreenD
 import kotlin.math.abs
 import kotlin.math.roundToInt
 import androidx.compose.ui.unit.IntOffset
@@ -824,7 +825,12 @@ fun SantopimediaApp() {
                     )
                 }
 
-                if (showLyrics) {
+                // ★ 歌詞画面はフェードイン/フェードアウトで出し入れする
+                AnimatedVisibility(
+                    visible = showLyrics,
+                    enter = fadeIn(tween(400)),
+                    exit = fadeOut(tween(300))
+                ) {
                     LyricsScreen(
                         viewModel = viewModel,
                         onDismiss = { showLyrics = false },
@@ -1368,13 +1374,34 @@ fun PlayerScreenWithSwipe(
                         onLongPressPlay = onLongPressPlay,
                         onDividerDragActiveChange = { isDividerDragActive = it }
                     )
-                    // ★ HomeScreenBは本プロジェクトのファイル一覧に含まれていないため、
-                    //   bottomNavBarHeightを渡していない。もしHomeScreenBが自前で
-                    //   WindowInsets.navigationBarsのみを見て余白を確保している場合、
-                    //   UI-Bのときだけ下部コントロールがピルナビゲーションバーに
-                    //   隠れる可能性がある。HomeScreenB.ktの内容を共有いただければ
-                    //   同様の対応を行える。
-                    else -> HomeScreenB(viewModel = viewModel, settings = settings, onLongPressPlay = onLongPressPlay)
+
+                    "B" -> HomeScreenB(
+                        viewModel = viewModel,
+                        settings = settings,
+                        bottomNavBarHeight = bottomNavBarHeight,
+                        endNavBarWidth = endNavBarWidth,
+                        onLongPressPlay = onLongPressPlay,
+                        onShowLyrics = onShowLyrics,
+                        onShowHistory = onShowHistory
+                    )
+                    "D" -> HomeScreenD(
+                        viewModel = viewModel,
+                        settings = settings,
+                        bottomNavBarHeight = bottomNavBarHeight,
+                        endNavBarWidth = endNavBarWidth,
+                        onLongPressPlay = onLongPressPlay,
+                        onShowLyrics = onShowLyrics,
+                        onShowHistory = onShowHistory
+                    )
+                    else -> HomeScreenA(
+                        viewModel = viewModel,
+                        settings = settings,
+                        bottomNavBarHeight = bottomNavBarHeight,
+                        endNavBarWidth = endNavBarWidth,
+                        onLongPressPlay = onLongPressPlay,
+                        onShowLyrics = onShowLyrics,
+                        onShowHistory = onShowHistory
+                    )
                 }
             }
 
@@ -1481,7 +1508,7 @@ private fun NavShortcutPanel(
                 modifier = Modifier.padding(bottom = 8.dp)
             )
             NavShortcutChipRow(
-                options = listOf("A" to "UI-A", "B" to "UI-B", "C" to "UI-C"),
+                options = listOf("A" to "UI-A", "B" to "UI-B", "C" to "UI-C", "D" to "UI-D"),
                 selected = settings.playerUiStyle,
                 accentColor = accentColor,
                 onSelect = { viewModel.updateSetting(SettingsKeys.PLAYER_UI_STYLE, it) }

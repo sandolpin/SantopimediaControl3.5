@@ -11,12 +11,13 @@ android {
         }
     }
 
+
     defaultConfig {
         applicationId = "com.sandolpin.santopimedia35"
         minSdk = 26
         targetSdk = 36
         versionCode = 1
-        versionName = "2.1.0"
+        versionName = "2.6"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -37,7 +38,29 @@ android {
     buildFeatures {
         compose = true
     }
+
+    buildTypes {
+        release {
+            isMinifyEnabled = true
+            isShrinkResources = true
+
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
+        }
+    }
+    splits {
+        abi {
+            isEnable = true
+            reset()
+            include("arm64-v8a", "armeabi-v7a")
+            isUniversalApk = false
+        }
+    }
 }
+
+
 
 dependencies {
     // Compose BOM

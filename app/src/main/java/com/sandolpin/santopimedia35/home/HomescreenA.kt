@@ -2,6 +2,9 @@ package com.sandolpin.santopimedia35.home
 
 import android.content.res.Configuration
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.AnimatedVisibilityScope
+import androidx.compose.animation.ExperimentalSharedTransitionApi
+import androidx.compose.animation.SharedTransitionScope
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.togetherWith
@@ -21,6 +24,8 @@ import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.SubcomposeLayout
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.animation.core.Animatable
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -75,6 +80,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
+import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
 import com.sandolpin.santopimedia35.shareScreenshot
@@ -99,11 +105,43 @@ private data class TrackInfoSnapshot(
     val album: String
 )
 
+// =============================================================================
+// ===== SharedElementTransition 補助 =====
+// -----------------------------------------------------------------------------
+// HomeScreenA(縦画面のみ)とLyricsScreen(縦画面ミニプレーヤー)の間で、
+// アルバムアート・タイトル・アーティストを連結したアニメーションにするための
+// 共通ヘルパー。sharedTransitionScope / animatedVisibilityScope のどちらかが
+// null（=連携未対応の呼び出し元。横画面・UI-B・UI-C・設定画面のプレビュー等）の
+// 場合は何もしない通常のModifierを返すため、既存の呼び出し元には影響しない。
+// =============================================================================
+object SharedLyricsKeys {
+    const val ALBUM_ART = "shared-album-art"
+    const val TITLE = "shared-track-title"
+    const val ARTIST = "shared-track-artist"
+}
+
+@OptIn(ExperimentalSharedTransitionApi::class)
+@Composable
+fun Modifier.sharedElementIfAvailable(
+    key: String,
+    sharedTransitionScope: SharedTransitionScope?,
+    animatedVisibilityScope: AnimatedVisibilityScope?
+): Modifier {
+    if (sharedTransitionScope == null || animatedVisibilityScope == null) return this
+    return with(sharedTransitionScope) {
+        this@sharedElementIfAvailable.sharedElement(
+            sharedContentState = rememberSharedContentState(key = key),
+            animatedVisibilityScope = animatedVisibilityScope
+        )
+    }
+}
+
 /**
  * UI-A PlayerScreen
  * レイアウト: アルバムアート(大) → 曲名 → シークバー → コントロール → 音量バー
  * コントロール・音量バーを下側に固定
  */
+@OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
 fun HomeScreenA(
     viewModel: MediaPlayerViewModel,
@@ -119,7 +157,13 @@ fun HomeScreenA(
     endNavBarWidth: androidx.compose.ui.unit.Dp = 0.dp,
     onLongPressPlay: () -> Unit,
     onShowLyrics: () -> Unit = {},
-    onShowHistory: () -> Unit = {}
+    onShowHistory: () -> Unit = {},
+    // ★ HomeScreenC⇔LyricsScreen間のsharedElementTransition用。
+    //   呼び出し元(MainActivity.kt)がSharedTransitionLayout配下でAnimatedVisibilityの
+    //   スコープを渡せる場合のみ非null。渡されない場合（横画面・呼び出し元未対応時）は
+    //   通常通りアニメーション連結なしで表示される。
+    sharedTransitionScope: SharedTransitionScope? = null,
+    homeAnimatedVisibilityScope: AnimatedVisibilityScope? = null
 ) {
     val mediaState: MediaState by viewModel.mediaState.collectAsState()
     val repeatMode by viewModel.repeatMode.collectAsState()
@@ -157,6 +201,11 @@ fun HomeScreenA(
     // animated かつ API < 33 の場合はぼかしにフォールバック
     val useAgsl    = isAnimated && android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU
     val useAnimatedFallback = isAnimated && !useAgsl  // API<33 → ぼかし
+    // ★ 動的アニメーションの色ルールで「アルバムアートのぼかし＋アルバムアートの色」を
+    //   選んだ場合、ぼかしたアルバムアートを下地に敷いた上で動的アニメーションの色の動きを
+    //   半透明で重ねる。API<33のフォールバック(useAnimatedFallback)とは別物で、
+    //   API33以降でも意図的にぼかし下地を使うためのフラグとして分離している。
+    val useBlurAlbumArtBase = isAnimated && settings.animatedColorSource == "blur_album_art"
 
     // ダークモード判定
     val isDark = when (settings.themeMode) {
@@ -184,7 +233,7 @@ fun HomeScreenA(
     //               blendedArtColorを使うことで、実際の画像の色構成に近い結果にする
     //               （鮮やかだが面積の小さい色だけが選ばれてしまうのを防ぐ）
     val animatedBgColor = when (settings.animatedColorSource) {
-        "album_art" -> mediaState.blendedArtColor.copy(alpha = 1f)
+        "album_art", "blur_album_art" -> mediaState.blendedArtColor.copy(alpha = 1f)
         else -> rawAccentColor
     }
 
@@ -254,7 +303,11 @@ fun HomeScreenA(
         ) { snap ->
             Box(modifier = Modifier.fillMaxSize()) {
                 // ===== ぼかし背景 =====
-                if (isBlur || useAnimatedFallback) {
+                // ★ 通常の「ぼかし」スタイル・動的アニメーションのAPI<33フォールバックに加えて、
+                //   動的アニメーションの色ルールで「アルバムアートのぼかし＋アルバムアートの色」
+                //   (blur_album_art)を選んだ場合も、ぼかしたアルバムアートを下地として使う。
+                val showBlurBase = isBlur || useAnimatedFallback || (useAgsl && useBlurAlbumArtBase)
+                if (showBlurBase) {
                     // ★ 白フラッシュ対策: AsyncImageは新しい画像の読み込みが終わるまで
                     //   何も描画しない（透明のまま）。Crossfadeでフェードイン中のこの層に
                     //   何も無いと、下に何も無ければテーマ背景（白）がそのまま透けて見え、
@@ -277,14 +330,20 @@ fun HomeScreenA(
                             contentScale = ContentScale.Crop
                         )
                         // blurStyle: normal=オーバーレイなし、dark_mode=ダーク連動オーバーレイ
-                        when (settings.blurStyle) {
-                            "dark_mode" -> Box(
-                                modifier = Modifier.fillMaxSize().background(
-                                    if (isDark) Color.Black.copy(alpha = 0.60f)
-                                    else        Color.White.copy(alpha = 0.60f)
+                        // ★ このオーバーレイは「ぼかし」スタイル本来の設定のため、
+                        //   isBlur(=backgroundStyleが実際に"blur")のときだけ適用する。
+                        //   blur_album_art（動的アニメーション側の色ルール）ではオーバーレイを
+                        //   重ねず、上に乗る動的アニメーションの色の動きがそのまま見えるようにする。
+                        if (isBlur) {
+                            when (settings.blurStyle) {
+                                "dark_mode" -> Box(
+                                    modifier = Modifier.fillMaxSize().background(
+                                        if (isDark) Color.Black.copy(alpha = 0.60f)
+                                        else        Color.White.copy(alpha = 0.60f)
+                                    )
                                 )
-                            )
-                            else -> { /* normal: オーバーレイなし */ }
+                                else -> { /* normal: オーバーレイなし */ }
+                            }
                         }
                     }
                 }
@@ -295,8 +354,12 @@ fun HomeScreenA(
                     AnimatedMeshBackground(
                         color1 = snap.animatedBgColor,  // 設定で選んだ色ソース（アクセント or アルバムアート）
                         darkness = settings.animatedBgDarkness,
+                        darkModeDarkness = settings.animatedBgDarknessDark,
                         colorPattern = settings.animatedColorPattern,
                         isDarkTheme = isDark,
+                        // blur_album_art時は下のぼかしアートが見えるよう半透明で重ねる。
+                        // それ以外（通常のanimated）は従来通り不透明。
+                        alpha = if (useBlurAlbumArtBase) 0.62f else 1f,
                         modifier = Modifier.fillMaxSize()
                     )
                 }
@@ -331,6 +394,17 @@ fun HomeScreenA(
                     )
                 }
             }
+        }
+
+        // ===== 背景装飾（ドット/水玉/ランダム図形。どの背景スタイルにも重ねられる独立レイヤー）=====
+        if (settings.bgDecorationType != "none") {
+            BackgroundDecorationLayer(
+                type = settings.bgDecorationType,
+                color = if (settings.bgDecorationColor == "white") Color.White else rawAccentColor,
+                opacity = settings.bgDecorationOpacity,
+                sizeScale = settings.bgDecorationSize,
+                modifier = Modifier.fillMaxSize()
+            )
         }
 
         if (isLandscape) {
@@ -375,207 +449,362 @@ fun HomeScreenA(
                 }
             )
         } else {
-            // ===== 縦画面レイアウト（従来通り）=====
+            // ===== 縦画面レイアウト =====
             // ★ 画面の幅が大きい端末では、fillMaxWidth()+aspectRatio(1f)のアルバムアートの
             //   「高さ」も幅に比例して大きくなる。以前はスクロール無しの固定Columnだったため、
             //   幅が大きいほどアルバムアートが縦にも大きくなり、その分だけ下のコントロール類が
-            //   画面下からはみ出して見切れてしまっていた（実際に発生した不具合）。
-            //   横画面レイアウト(HomeScreenALandscapeContent)と同じ考え方で、
-            //   verticalScrollを保険として付け、万一収まりきらない場合でも
-            //   クリップされて操作不能になるのではなく、スクロールで最後まで
-            //   到達できるようにする。
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .verticalScroll(rememberScrollState())
-                    .padding(horizontal = 20.dp)
-                    .padding(
-                        top = WindowInsets.statusBars.asPaddingValues().calculateTopPadding() + 20.dp,
-                        // ★ 以前はWindowInsets.navigationBars（システムのナビゲーションバー分）のみを
-                        //   見ていたが、これだとMainActivity.kt側のピル型ナビゲーションバー自体の
-                        //   高さは考慮されておらず、コントロール等がピルに隠れる可能性があった。
-                        //   bottomNavBarHeightはピル+システムナビゲーションバー分を含めて実測した
-                        //   値のため、これを使うことでコントロールがピルに隠れないようにする。
-                        //   （背景は上のBoxで既にfillMaxSize()のままなのでピルの裏まで届く）
-                        bottom = bottomNavBarHeight
-                    ),
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                Spacer(modifier = Modifier.height(4.dp))
-
-                // ===== アルバムアート（上部・大きく表示）=====
-                AlbumArtCard(
-                    uri = mediaState.albumArtUri,
-                    bitmap = mediaState.albumArtBitmap,
-                    shadowColor = accentColor,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .aspectRatio(1f)
-                )
-
-                Spacer(modifier = Modifier.height(12.dp))
-
-                // ===== 波形 =====
-                if (settings.showWaveform) {
-                    WaveformAnimation(
-                        isPlaying = mediaState.isPlaying,
-                        color = accentColor,
-                        modifier = Modifier.height(14.dp).fillMaxWidth(0.22f)
+            //   画面下からはみ出して見切れてしまっていた不具合の対策として、一度は保険で
+            //   verticalScrollを追加した。しかし「スクロールできる仕様自体をやめたい」という
+            //   要望のため、SubcomposeLayoutで「アート以外に必要な高さ」を実測してから、
+            //   残りの高さと画面幅のうち小さい方をアートの一辺サイズにする方式に変更した。
+            //   マジックナンバーでの見積もりではなく実測のため、フォントサイズ設定や
+            //   波形表示ON/OFFが何であっても、常に正確にスクロール無しで収まる。
+            HomeScreenAPortraitAdaptive(
+                mediaState = mediaState,
+                settings = settings,
+                viewModel = viewModel,
+                accentColor = accentColor,
+                iconColor = iconColor,
+                textColor = textColor,
+                textColorSub = textColorSub,
+                isBlur = isBlur,
+                isAnimated = isAnimated,
+                repeatMode = repeatMode,
+                lastSkipDirection = lastSkipDirection,
+                isShuffleEnabled = isShuffleEnabled,
+                isFavorite = isFavorite,
+                bottomNavBarHeight = bottomNavBarHeight,
+                onLongPressPlay = onLongPressPlay,
+                onShowLyrics = onShowLyrics,
+                onShowHistory = onShowHistory,
+                onToggleFavorite = {
+                    favoriteViewModel.toggleFavorite(
+                        title       = mediaState.title,
+                        artist      = mediaState.artist,
+                        album       = mediaState.album,
+                        albumArtUri = resolvedFavoriteArtUri,
+                        appLabel    = mediaState.appLabel,
+                        packageName = mediaState.packageName,
+                        mediaId     = mediaState.mediaId,
+                        durationMs  = mediaState.durationMs
                     )
-                    Spacer(modifier = Modifier.height(14.dp))
-                }
-
-                // ===== シークバー =====
-                if (settings.waveSeekBar) {
-                    WaveSeekBar(
-                        progress = mediaState.progress,
-                        onProgressChange = { viewModel.seekTo(it) },
-                        thickness = settings.seekBarThickness.dp,
-                        color = accentColor,
-                        style = settings.waveSeekBarStyle,
-                        isPlaying = mediaState.isPlaying,
-                        durationMs = mediaState.durationMs
+                },
+                onShare = {
+                    shareScreenshot(
+                        context = favoriteContext,
+                        title   = mediaState.title,
+                        artist  = mediaState.artist
                     )
-                } else {
-                    NormalSeekBar(
-                        progress = mediaState.progress,
-                        onProgressChange = { viewModel.seekTo(it) },
-                        thickness = settings.seekBarThickness.dp,
-                        color = accentColor,
-                        durationMs = mediaState.durationMs
-                    )
-                }
-
-                Spacer(modifier = Modifier.height(6.dp))
-
-                // ===== 時間表示 + 空間オーディオバッジ（中央）=====
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        mediaState.currentPositionStr,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = textColorSub
-                    )
-                    if (mediaState.isSpatialAudio) {
-                        SpatialAudioBadge(isBlurBg = isBlur)
-                    }
-                    Text(
-                        "-${mediaState.remainingTimeStr}",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = textColorSub
-                    )
-                }
-
-                // ===== シークバーとタイトルの間の余白（追加: 10dp→16dp→26dp）=====
-                Spacer(modifier = Modifier.height(26.dp))
-
-                // ===== 曲名・アーティスト（曲切り替え時にスライドアニメーション）=====
-                // 次へ(lastSkipDirection>=0): 新しいテキストは右から入り、古いテキストは左へ抜ける
-                // 前へ(lastSkipDirection<0) : 新しいテキストは左から入り、古いテキストは右へ抜ける
-                val trackInfoSnapshot = TrackInfoSnapshot(
-                    title = mediaState.title,
-                    artist = mediaState.artist,
-                    album = mediaState.album
-                )
-                AnimatedContent(
-                    targetState = trackInfoSnapshot,
-                    transitionSpec = {
-                        val spec = tween<androidx.compose.ui.unit.IntOffset>(durationMillis = 350)
-                        if (lastSkipDirection >= 0) {
-                            (slideInHorizontally(animationSpec = spec) { width -> width } + fadeIn(tween(350))) togetherWith
-                                    (slideOutHorizontally(animationSpec = spec) { width -> -width } + fadeOut(tween(200)))
-                        } else {
-                            (slideInHorizontally(animationSpec = spec) { width -> -width } + fadeIn(tween(350))) togetherWith
-                                    (slideOutHorizontally(animationSpec = spec) { width -> width } + fadeOut(tween(200)))
-                        }.using(SizeTransform(clip = false))
-                    },
-                    label = "trackInfoSlide"
-                ) { snap ->
-                    TrackInfo(
-                        title = snap.title,
-                        artist = snap.artist,
-                        album = snap.album,
-                        titleFontSize = settings.titleFontSize.sp,
-                        titleFontWeight = FontWeight(settings.titleFontWeight),
-                        artistFontSize = settings.artistFontSize.sp,
-                        artistFontWeight = FontWeight(settings.artistFontWeight),
-                        albumFontSize = settings.albumFontSize.sp,
-                        albumFontWeight = FontWeight(settings.albumFontWeight),
-                        scrollTitle = settings.scrollLongTitle,
-                        textColor = textColor,
-                        isBlurBg = isBlur,
-                    )
-                }
-
-                // ★ 以前はSpacer(weight(1f))で残りスペースを全て埋めてコントロールを
-                //   画面下端まで押し下げていたため、テキストとコントロールの間に
-                //   大きな空白ができていた。固定の余白に変更し、間隔を調整する。
-                Spacer(modifier = Modifier.height(56.dp))
-
-                // ===== コントロールボタン =====
-                PlayerControlsA(
-                    isPlaying = mediaState.isPlaying,
-                    onPrev = { viewModel.skipToPrevious() },
-                    onNext = { viewModel.skipToNext() },
-                    onPlayPause = { viewModel.togglePlayPause() },
-                    onRewind = { viewModel.seekRelative(-10000L) },
-                    onFastForward = { viewModel.seekRelative(10000L) },
-                    onLongPressPlay = onLongPressPlay,
-                    buttonColor = accentColor,
-                    iconColor = iconColor,
-                    // animated + 白固定ON: ボタン背景が白になるので再生アイコンだけ黒にする
-                    playIconColor = if (isAnimated && settings.animatedWhiteIcon) Color.Black
-                    else Color.Unspecified,
-                    vibrationMs = if (settings.vibrationEnabled) settings.vibrationStrength else 0,
-                    isBlurBg = isBlur,
-                )
-
-                Spacer(modifier = Modifier.height(28.dp))
-
-                // ===== サブボタン（左右ショートカット・音量）=====
-                SubControlsA(
-                    mediaState       = mediaState,
-                    repeatMode       = repeatMode,
-                    isShuffleEnabled = isShuffleEnabled,
-                    isFavorite       = isFavorite,
-                    shortcutLeft     = settings.homeShortcutLeft,
-                    shortcutRight    = settings.homeShortcutRight,
-                    onShowLyrics     = onShowLyrics,
-                    onVolumeChange   = { viewModel.setVolume(it) },
-                    onRepeat         = { viewModel.cycleRepeatMode() },
-                    onShuffle        = { viewModel.toggleShuffle() },
-                    onToggleFavorite = {
-                        favoriteViewModel.toggleFavorite(
-                            title       = mediaState.title,
-                            artist      = mediaState.artist,
-                            album       = mediaState.album,
-                            albumArtUri = resolvedFavoriteArtUri,
-                            appLabel    = mediaState.appLabel,
-                            packageName = mediaState.packageName,
-                            mediaId     = mediaState.mediaId,
-                            durationMs  = mediaState.durationMs
-                        )
-                    },
-                    onShowHistory    = onShowHistory,
-                    onShare          = {
-                        shareScreenshot(
-                            context = favoriteContext,
-                            title   = mediaState.title,
-                            artist  = mediaState.artist
-                        )
-                    },
-                    accentColor      = accentColor,
-                    iconColor        = iconColor,
-                    isBlurBg         = isBlur,
-                    textColor        = textColor,
-                )
-
-                Spacer(modifier = Modifier.height(28.dp))
-            }
+                },
+                sharedTransitionScope = sharedTransitionScope,
+                homeAnimatedVisibilityScope = homeAnimatedVisibilityScope
+            )
         } // else（縦画面）ここまで
+    }
+}
+
+// =============================================================================
+// 縦画面レイアウト: SubcomposeLayoutでアート以外の高さを先に実測してから
+// アートのサイズを逆算する（スクロール無しで必ず全要素が収まるようにするため）
+// -----------------------------------------------------------------------------
+// 【仕組み】
+//   1. "below"スロットでアート以外のコンテンツ（波形〜サブコントロール）を
+//      「幅は画面いっぱい・高さは無制限」の制約で先に測る（実際に描画はまだしない）。
+//      これで、今の設定（フォントサイズ・波形ON/OFF等）における本当に必要な高さがわかる。
+//   2. 画面の高さから、その「below」の高さと固定スペーサー分を引いた残りと、
+//      画面幅を比較し、小さい方をアートの一辺サイズにする。
+//      → 高さが十分ある端末では幅いっぱい（従来通り）、
+//        高さが足りない端末（画面幅が広く高さが低い等）では自動的にアートが縮む。
+//   3. 決まったサイズでアートを測って配置し、その下に"below"を配置する。
+// =============================================================================
+@OptIn(ExperimentalSharedTransitionApi::class)
+@Composable
+private fun HomeScreenAPortraitAdaptive(
+    mediaState: MediaState,
+    settings: AppSettings,
+    viewModel: MediaPlayerViewModel,
+    accentColor: Color,
+    iconColor: Color,
+    textColor: Color,
+    textColorSub: Color,
+    isBlur: Boolean,
+    isAnimated: Boolean,
+    repeatMode: QueueRepeatMode,
+    lastSkipDirection: Int,
+    isShuffleEnabled: Boolean,
+    isFavorite: Boolean,
+    bottomNavBarHeight: androidx.compose.ui.unit.Dp,
+    onLongPressPlay: () -> Unit,
+    onShowLyrics: () -> Unit,
+    onShowHistory: () -> Unit,
+    onToggleFavorite: () -> Unit,
+    onShare: () -> Unit,
+    sharedTransitionScope: SharedTransitionScope?,
+    homeAnimatedVisibilityScope: AnimatedVisibilityScope?,
+) {
+    SubcomposeLayout(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(horizontal = 20.dp)
+            .padding(
+                top = WindowInsets.statusBars.asPaddingValues().calculateTopPadding() + 20.dp,
+                // ★ bottomNavBarHeightはピル+システムナビゲーションバー分を含めて実測した値。
+                //   これを使うことでコントロールがピルに隠れないようにする
+                //   （背景は上のBoxで既にfillMaxSize()のままなのでピルの裏まで届く）
+                bottom = bottomNavBarHeight
+            )
+    ) { constraints ->
+        val fullWidth = constraints.maxWidth
+        val fullHeight = constraints.maxHeight
+        val topSpacerPx = 4.dp.roundToPx()
+        val artGapPx = 12.dp.roundToPx()
+        val minArtPx = 100.dp.roundToPx() // アートが小さくなりすぎないための下限
+
+        // ① アート以外のコンテンツを高さ無制限で先に測る
+        val belowPlaceable = subcompose("below") {
+            HomeScreenAPortraitBelowArt(
+                mediaState = mediaState,
+                settings = settings,
+                viewModel = viewModel,
+                accentColor = accentColor,
+                iconColor = iconColor,
+                textColor = textColor,
+                textColorSub = textColorSub,
+                isBlur = isBlur,
+                isAnimated = isAnimated,
+                repeatMode = repeatMode,
+                lastSkipDirection = lastSkipDirection,
+                isShuffleEnabled = isShuffleEnabled,
+                isFavorite = isFavorite,
+                onLongPressPlay = onLongPressPlay,
+                onShowLyrics = onShowLyrics,
+                onShowHistory = onShowHistory,
+                onToggleFavorite = onToggleFavorite,
+                onShare = onShare,
+                sharedTransitionScope = sharedTransitionScope,
+                homeAnimatedVisibilityScope = homeAnimatedVisibilityScope,
+            )
+        }.first().measure(
+            Constraints(
+                minWidth = fullWidth, maxWidth = fullWidth,
+                minHeight = 0, maxHeight = Constraints.Infinity
+            )
+        )
+
+        // ② 残り高さと画面幅のうち小さい方をアートの一辺サイズにする
+        val availableForArtPx = (fullHeight - belowPlaceable.height - topSpacerPx - artGapPx)
+            .coerceAtLeast(minArtPx)
+        val artSizePx = minOf(fullWidth, availableForArtPx)
+
+        // ③ 決まったサイズでアートを測る
+        // ★ sharedElementはComposable自身のサイズ変化をアニメーションで補間するため、
+        //   ここで.size()を固定していても、LyricsScreen側のサイズへ滑らかに変形する。
+        val artPlaceable = subcompose("art") {
+            AlbumArtCard(
+                uri = mediaState.albumArtUri,
+                bitmap = mediaState.albumArtBitmap,
+                shadowColor = accentColor,
+                modifier = Modifier
+                    .size(artSizePx.toDp())
+                    .sharedElementIfAvailable(
+                        key = SharedLyricsKeys.ALBUM_ART,
+                        sharedTransitionScope = sharedTransitionScope,
+                        animatedVisibilityScope = homeAnimatedVisibilityScope
+                    )
+            )
+        }.first().measure(Constraints.fixed(artSizePx, artSizePx))
+
+        val totalContentHeight = topSpacerPx + artPlaceable.height + artGapPx + belowPlaceable.height
+
+        layout(fullWidth, maxOf(totalContentHeight, fullHeight)) {
+            val artX = (fullWidth - artPlaceable.width) / 2
+            var y = topSpacerPx
+            artPlaceable.placeRelative(artX, y)
+            y += artPlaceable.height + artGapPx
+            belowPlaceable.placeRelative(0, y)
+        }
+    }
+}
+
+// ===== 縦画面: アルバムアート以外のコンテンツ（波形〜サブコントロールまで）=====
+@OptIn(ExperimentalSharedTransitionApi::class)
+@Composable
+private fun HomeScreenAPortraitBelowArt(
+    mediaState: MediaState,
+    settings: AppSettings,
+    viewModel: MediaPlayerViewModel,
+    accentColor: Color,
+    iconColor: Color,
+    textColor: Color,
+    textColorSub: Color,
+    isBlur: Boolean,
+    isAnimated: Boolean,
+    repeatMode: QueueRepeatMode,
+    lastSkipDirection: Int,
+    isShuffleEnabled: Boolean,
+    isFavorite: Boolean,
+    onLongPressPlay: () -> Unit,
+    onShowLyrics: () -> Unit,
+    onShowHistory: () -> Unit,
+    onToggleFavorite: () -> Unit,
+    onShare: () -> Unit,
+    sharedTransitionScope: SharedTransitionScope?,
+    homeAnimatedVisibilityScope: AnimatedVisibilityScope?,
+) {
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        // ===== 波形 =====
+        if (settings.showWaveform) {
+            WaveformAnimation(
+                isPlaying = mediaState.isPlaying,
+                color = accentColor,
+                modifier = Modifier.height(14.dp).fillMaxWidth(0.22f)
+            )
+            Spacer(modifier = Modifier.height(14.dp))
+        }
+
+        // ===== シークバー =====
+        if (settings.waveSeekBar) {
+            WaveSeekBar(
+                progress = mediaState.progress,
+                onProgressChange = { viewModel.seekTo(it) },
+                thickness = settings.seekBarThickness.dp,
+                color = accentColor,
+                style = settings.waveSeekBarStyle,
+                isPlaying = mediaState.isPlaying,
+                durationMs = mediaState.durationMs
+            )
+        } else {
+            NormalSeekBar(
+                progress = mediaState.progress,
+                onProgressChange = { viewModel.seekTo(it) },
+                thickness = settings.seekBarThickness.dp,
+                color = accentColor,
+                durationMs = mediaState.durationMs
+            )
+        }
+
+        Spacer(modifier = Modifier.height(6.dp))
+
+        // ===== 時間表示 + 空間オーディオバッジ（中央）=====
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                mediaState.currentPositionStr,
+                style = MaterialTheme.typography.labelSmall,
+                color = textColorSub
+            )
+            if (mediaState.isSpatialAudio) {
+                SpatialAudioBadge(isBlurBg = isBlur)
+            }
+            Text(
+                "-${mediaState.remainingTimeStr}",
+                style = MaterialTheme.typography.labelSmall,
+                color = textColorSub
+            )
+        }
+
+        // ===== シークバーとタイトルの間の余白 =====
+        Spacer(modifier = Modifier.height(26.dp))
+
+        // ===== 曲名・アーティスト（曲切り替え時にスライドアニメーション）=====
+        val trackInfoSnapshot = TrackInfoSnapshot(
+            title = mediaState.title,
+            artist = mediaState.artist,
+            album = mediaState.album
+        )
+        AnimatedContent(
+            targetState = trackInfoSnapshot,
+            transitionSpec = {
+                val spec = tween<androidx.compose.ui.unit.IntOffset>(durationMillis = 350)
+                if (lastSkipDirection >= 0) {
+                    (slideInHorizontally(animationSpec = spec) { width -> width } + fadeIn(tween(350))) togetherWith
+                            (slideOutHorizontally(animationSpec = spec) { width -> -width } + fadeOut(tween(200)))
+                } else {
+                    (slideInHorizontally(animationSpec = spec) { width -> -width } + fadeIn(tween(350))) togetherWith
+                            (slideOutHorizontally(animationSpec = spec) { width -> width } + fadeOut(tween(200)))
+                }.using(SizeTransform(clip = false))
+            },
+            label = "trackInfoSlide"
+        ) { snap ->
+            TrackInfo(
+                title = snap.title,
+                artist = snap.artist,
+                album = snap.album,
+                titleFontSize = settings.titleFontSize.sp,
+                titleFontWeight = FontWeight(settings.titleFontWeight),
+                artistFontSize = settings.artistFontSize.sp,
+                artistFontWeight = FontWeight(settings.artistFontWeight),
+                albumFontSize = settings.albumFontSize.sp,
+                albumFontWeight = FontWeight(settings.albumFontWeight),
+                scrollTitle = settings.scrollLongTitle,
+                textColor = textColor,
+                isBlurBg = isBlur,
+                titleModifier = Modifier.sharedElementIfAvailable(
+                    key = SharedLyricsKeys.TITLE,
+                    sharedTransitionScope = sharedTransitionScope,
+                    animatedVisibilityScope = homeAnimatedVisibilityScope
+                ),
+                artistModifier = Modifier.sharedElementIfAvailable(
+                    key = SharedLyricsKeys.ARTIST,
+                    sharedTransitionScope = sharedTransitionScope,
+                    animatedVisibilityScope = homeAnimatedVisibilityScope
+                ),
+            )
+        }
+
+        // ★ 以前はSpacer(weight(1f))で残りスペースを全て埋めてコントロールを
+        //   画面下端まで押し下げていたため、テキストとコントロールの間に
+        //   大きな空白ができていた。固定の余白に変更し、間隔を調整する。
+        Spacer(modifier = Modifier.height(56.dp))
+
+        // ===== コントロールボタン =====
+        PlayerControlsA(
+            isPlaying = mediaState.isPlaying,
+            onPrev = { viewModel.skipToPrevious() },
+            onNext = { viewModel.skipToNext() },
+            onPlayPause = { viewModel.togglePlayPause() },
+            onRewind = { viewModel.seekRelative(-10000L) },
+            onFastForward = { viewModel.seekRelative(10000L) },
+            onLongPressPlay = onLongPressPlay,
+            buttonColor = accentColor,
+            iconColor = iconColor,
+            // animated + 白固定ON: ボタン背景が白になるので再生アイコンだけ黒にする
+            playIconColor = if (isAnimated && settings.animatedWhiteIcon) Color.Black
+            else Color.Unspecified,
+            vibrationMs = if (settings.vibrationEnabled) settings.vibrationStrength else 0,
+            isBlurBg = isBlur,
+        )
+
+        Spacer(modifier = Modifier.height(28.dp))
+
+        // ===== サブボタン（左右ショートカット・音量）=====
+        SubControlsA(
+            mediaState       = mediaState,
+            repeatMode       = repeatMode,
+            isShuffleEnabled = isShuffleEnabled,
+            isFavorite       = isFavorite,
+            shortcutLeft     = settings.homeShortcutLeft,
+            shortcutRight    = settings.homeShortcutRight,
+            onShowLyrics     = onShowLyrics,
+            onVolumeChange   = { viewModel.setVolume(it) },
+            onRepeat         = { viewModel.cycleRepeatMode() },
+            onShuffle        = { viewModel.toggleShuffle() },
+            onToggleFavorite = onToggleFavorite,
+            onShowHistory    = onShowHistory,
+            onShare          = onShare,
+            accentColor      = accentColor,
+            iconColor        = iconColor,
+            isBlurBg         = isBlur,
+            textColor        = textColor,
+        )
+
+        Spacer(modifier = Modifier.height(28.dp))
     }
 }
 
@@ -1290,6 +1519,10 @@ fun TrackInfo(
     scrollTitle: Boolean = false,
     textColor: Color = Color.Unspecified,
     isBlurBg: Boolean = false,
+    // ★ HomeScreenC⇔LyricsScreen間のsharedElementTransition用。
+    //   デフォルトはModifier（何もしない）のため、他の呼び出し元は無変更で動作する。
+    titleModifier: Modifier = Modifier,
+    artistModifier: Modifier = Modifier,
 ) {
     // ぼかし背景時はテキストに影を付ける
     // ただし dark_mode + ライトモードは白オーバーレイ上なのでシャドウ不要
@@ -1352,6 +1585,7 @@ fun TrackInfo(
                     .fillMaxWidth()
                     .clipToBounds()
                     .onGloballyPositioned { containerWidthPx = it.size.width }
+                    .then(titleModifier)
             ) {
                 Row(
                     modifier = Modifier
@@ -1394,6 +1628,7 @@ fun TrackInfo(
                 maxLines = 1,
                 overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
                 style = shadowStyle,
+                modifier = titleModifier,
             )
         }
         Spacer(modifier = Modifier.height(6.dp))
@@ -1405,6 +1640,7 @@ fun TrackInfo(
             maxLines = 1,
             overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
             style = shadowStyle,
+            modifier = artistModifier,
         )
         if (album.isNotEmpty()) {
             Spacer(modifier = Modifier.height(4.dp))
@@ -1925,13 +2161,21 @@ private fun resolveMeshColorPattern(pattern: String): MeshColorPatternParams = w
 fun AnimatedMeshBackground(
     color1: Color,
     // ★ 背景の色の濃さ(明るさ倍率)。設定画面のスライダーで0.6〜1.0の範囲で調整する。
-    //   低いほど暗く落ち着いた背景になる。
+    //   低いほど暗く落ち着いた背景になる。ライトモード用。
     darkness: Float = 0.88f,
+    // ★ ダークモード専用の濃さ。以前は isDarkTheme のとき darkness*0.75 という
+    //   固定倍率で自動計算していたが、ユーザーが独立して調整できるよう
+    //   専用スライダーの値をそのまま使う方式に変更した。
+    darkModeDarkness: Float = 0.65f,
     // ★ 色の混ぜ方パターン。"soft"/"normal"/"vivid"/"complementary"
     colorPattern: String = "normal",
     // ★ ダークモードのときは明示的にさらに暗くする（ライトモードと同じ濃さのままだと
     //   ダークテーマ全体の中で背景だけが浮いて明るく見えてしまうため）。
     isDarkTheme: Boolean = false,
+    // ★ 背景の不透明度。「アルバムアートのぼかし＋色」のように、下にぼかし画像を
+    //   敷いてこの動的アニメーションを半透明で重ねたいケースのために追加した。
+    //   通常のanimatedスタイル単体では1f（不透明）のまま使う。
+    alpha: Float = 1f,
     modifier: Modifier = Modifier
 ) {
     val params = resolveMeshColorPattern(colorPattern)
@@ -1966,9 +2210,8 @@ fun AnimatedMeshBackground(
     val c3 = Color(android.graphics.Color.HSVToColor(hsv3))
 
     // ===== 最終的な明るさ倍率 =====
-    // 設定のdarknessスライダー値に加え、ダークモード時は追加でさらに暗くする。
-    // (0.6〜1.0のdarknessに対し、ダークモードでは×0.75程度で明確に暗くなるようにする)
-    val effectiveDarkness = (if (isDarkTheme) darkness * 0.75f else darkness).coerceIn(0.25f, 1f)
+    // ダークモード時はdarkModeDarkness（専用スライダー）、それ以外はdarkness（通常スライダー）を使う。
+    val effectiveDarkness = (if (isDarkTheme) darkModeDarkness else darkness).coerceIn(0.25f, 1f)
 
     // ===== 時間アニメーション（nanoTimeベース: リセットなし・完全連続）=====
     // infiniteTransition + RepeatMode.Restart は 0→2π で値が瞬間リセットされ
@@ -2057,9 +2300,178 @@ fun AnimatedMeshBackground(
         // RuntimeShader を android.graphics.Paint に直接セットして nativeCanvas で描画
         val paint = android.graphics.Paint()
         paint.shader = shader
+        paint.alpha = (alpha.coerceIn(0f, 1f) * 255).toInt()
 
         drawContext.canvas.nativeCanvas.drawRect(
             0f, 0f, size.width, size.height, paint
         )
+    }
+}
+
+// =============================================================================
+// ===== 背景装飾（ドットグラデーション / 水玉 / ランダム図形）=====
+// =============================================================================
+// backgroundStyle（default/gradient/blur/color_mix/animated）とは独立した
+// 追加の装飾レイヤー。どのスタイルの上にも重ねて表示できる。
+// ・dot_gradient : 画面下ほど大きく・濃く、上ほど小さく・薄くなるドットのグラデーション
+// ・polka_dot    : 均一な間隔・大きさで千鳥に並ぶ水玉模様
+// ・random_shapes: 円・四角・三角をランダムな位置・大きさ・回転で散りばめた図形
+// 色は呼び出し側（HomeScreenA.kt等）からaccentColorか白固定を渡してもらい、
+// 不透明度・大きさ倍率は設定(bgDecorationOpacity/bgDecorationSize)で調整できる。
+//
+// ★ scrollOffsetPx: 歌詞画面でスクロールに連動して装飾を動かすための引数。
+//   0f（デフォルト）を渡せば従来通り静止したまま。呼び出し側（LyricsScreen.kt）で
+//   歌詞のスクロール量に「歌詞と区別がつくよう控えめな係数」をかけた値を渡すことで、
+//   歌詞そのものより少ない量だけ装飾もスクロールする（パララックス効果）。
+//   パターン自体をスクロール量ぶんずらし、間隔(spacing)や画面高さで折り返すことで、
+//   継ぎ目なくループして見えるようにしている。
+// =============================================================================
+private data class RandomShapeSpec(
+    val xFrac: Float,
+    val yFrac: Float,
+    val sizeFrac: Float,
+    val rotationDeg: Float,
+    val shapeType: Int // 0=円 1=四角 2=三角
+)
+
+@Composable
+fun BackgroundDecorationLayer(
+    type: String,
+    color: Color,
+    opacity: Float,
+    sizeScale: Float,
+    scrollOffsetPx: Float = 0f,
+    modifier: Modifier = Modifier
+) {
+    when (type) {
+        "dot_gradient"  -> DotGradientDecoration(color, opacity, sizeScale, scrollOffsetPx, modifier)
+        "polka_dot"     -> PolkaDotDecoration(color, opacity, sizeScale, scrollOffsetPx, modifier)
+        "random_shapes" -> RandomShapesDecoration(color, opacity, sizeScale, scrollOffsetPx, modifier)
+        else -> { /* "none" 等: 何も描画しない */ }
+    }
+}
+
+@Composable
+private fun DotGradientDecoration(
+    color: Color,
+    opacity: Float,
+    sizeScale: Float,
+    scrollOffsetPx: Float,
+    modifier: Modifier
+) {
+    Canvas(modifier = modifier) {
+        // ★ 以前は34dpと間隔が広すぎて粗く見えていたため、
+        //   参考画像のような密なハーフトーン風になるよう大幅に詰めた。
+        val spacing = 15.dp.toPx() * sizeScale
+        if (spacing <= 0f) return@Canvas
+        val cols = (size.width / spacing).toInt() + 2
+        val rows = (size.height / spacing).toInt() + 3
+        // スクロール量をspacingで折り返し、継ぎ目なくループするようにする
+        val wrappedScroll = scrollOffsetPx % spacing
+        for (row in -1 until rows) {
+            for (col in 0 until cols) {
+                val x = col * spacing
+                val y = row * spacing + wrappedScroll
+                // 下（画面下）ほど濃く・大きく、上ほど薄く・小さくすることで
+                // グラデーションらしい奥行きを出す。大きい方は隣同士がくっつき、
+                // 参考画像のような「下はほぼ塗りつぶし」の見た目に近づける。
+                val verticalFrac = (y / size.height).coerceIn(0f, 1f)
+                val dotAlpha = ((0.25f + verticalFrac * 0.75f) * opacity).coerceIn(0f, 1f)
+                val dotRadius = spacing * (0.12f + verticalFrac * 0.46f)
+                drawCircle(
+                    color = color.copy(alpha = dotAlpha),
+                    radius = dotRadius,
+                    center = Offset(x, y)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun PolkaDotDecoration(
+    color: Color,
+    opacity: Float,
+    sizeScale: Float,
+    scrollOffsetPx: Float,
+    modifier: Modifier
+) {
+    Canvas(modifier = modifier) {
+        val spacing = 40.dp.toPx() * sizeScale
+        val radius = 5.dp.toPx() * sizeScale
+        if (spacing <= 0f) return@Canvas
+        val cols = (size.width / spacing).toInt() + 2
+        val rows = (size.height / spacing).toInt() + 3
+        val wrappedScroll = scrollOffsetPx % spacing
+        val dotColor = color.copy(alpha = opacity.coerceIn(0f, 1f))
+        for (row in -1 until rows) {
+            // 1行ごとにずらして千鳥配置にすることで水玉らしい見た目にする
+            // （rowが負の値になってもchequered判定が崩れないよう剰余の符号をそのまま利用）
+            val rowOffsetX = if (row % 2 != 0) spacing / 2f else 0f
+            for (col in 0 until cols) {
+                val x = col * spacing + rowOffsetX
+                val y = row * spacing + wrappedScroll
+                drawCircle(color = dotColor, radius = radius, center = Offset(x, y))
+            }
+        }
+    }
+}
+
+@Composable
+private fun RandomShapesDecoration(
+    color: Color,
+    opacity: Float,
+    sizeScale: Float,
+    scrollOffsetPx: Float,
+    modifier: Modifier
+) {
+    // ★ 以前は固定シード(42)で常に同じ配置になっていたが、
+    //   「読み込みごとに形・配置を変えてほしい」という要望に合わせ、
+    //   Composableが新しく生成される（画面に新しく入る）たびに毎回
+    //   ランダムなシードで再生成する。sizeScaleが変わったときも再生成される。
+    //   同じ画面にとどまっている間の再コンポーズでは配置を維持したいため、
+    //   rememberでキャッシュする（毎フレーム変わるとチラついてしまうため）。
+    val shapes = remember(sizeScale) {
+        val random = kotlin.random.Random(System.nanoTime())
+        List(18) {
+            RandomShapeSpec(
+                xFrac = random.nextFloat(),
+                yFrac = random.nextFloat(),
+                sizeFrac = (0.03f + random.nextFloat() * 0.05f) * sizeScale,
+                rotationDeg = random.nextFloat() * 360f,
+                shapeType = random.nextInt(3)
+            )
+        }
+    }
+    Canvas(modifier = modifier) {
+        val minDim = kotlin.math.min(size.width, size.height)
+        val shapeColor = color.copy(alpha = opacity.coerceIn(0f, 1f))
+        val h = size.height
+        shapes.forEach { spec ->
+            val cx = spec.xFrac * size.width
+            // スクロール量を画面の高さで折り返し、図形が継ぎ目なくループして動くようにする
+            var cy = (spec.yFrac * h + scrollOffsetPx) % h
+            if (cy < 0f) cy += h
+            val shapeSize = minDim * spec.sizeFrac
+            rotate(degrees = spec.rotationDeg, pivot = Offset(cx, cy)) {
+                when (spec.shapeType) {
+                    0 -> drawCircle(color = shapeColor, radius = shapeSize / 2f, center = Offset(cx, cy))
+                    1 -> drawRect(
+                        color = shapeColor,
+                        topLeft = Offset(cx - shapeSize / 2f, cy - shapeSize / 2f),
+                        size = Size(shapeSize, shapeSize)
+                    )
+                    else -> {
+                        val path = androidx.compose.ui.graphics.Path().apply {
+                            moveTo(cx, cy - shapeSize / 2f)
+                            lineTo(cx + shapeSize / 2f, cy + shapeSize / 2f)
+                            lineTo(cx - shapeSize / 2f, cy + shapeSize / 2f)
+                            close()
+                        }
+                        drawPath(path = path, color = shapeColor)
+                    }
+                }
+            }
+        }
     }
 }

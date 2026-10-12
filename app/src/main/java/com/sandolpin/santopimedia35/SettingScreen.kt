@@ -531,7 +531,7 @@ private fun AppearancePage(viewModel: MediaPlayerViewModel, settings: AppSetting
         SettingSection("プレーヤー") {
             SettingRow(label = "プレーヤーUI") {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    listOf("A", "B", "C").forEach { style ->
+                    listOf("A", "B", "C", "D").forEach { style ->
                         FilterChip(selected = settings.playerUiStyle == style,
                             onClick = { viewModel.updateSetting(SettingsKeys.PLAYER_UI_STYLE, style) },
                             label = { Text("UI-$style") })
@@ -589,8 +589,9 @@ private fun AppearancePage(viewModel: MediaPlayerViewModel, settings: AppSetting
                 SettingRow(label = "背景の色ルール") {
                     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         listOf(
-                            "accent"    to "アクセントカラーから",
-                            "album_art" to "アルバムアートから"
+                            "accent"          to "アクセントカラーから",
+                            "album_art"       to "アルバムアートから",
+                            "blur_album_art"  to "アルバムアートのぼかし＋色"
                         ).forEach { (v, label) ->
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 RadioButton(
@@ -601,6 +602,13 @@ private fun AppearancePage(viewModel: MediaPlayerViewModel, settings: AppSetting
                             }
                         }
                     }
+                }
+                if (settings.animatedColorSource == "blur_album_art") {
+                    Text(
+                        "ぼかしたアルバムアートの上に、動的アニメーションの色の動きを半透明で重ねます",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurface.copy(0.5f)
+                    )
                 }
                 SettingSwitchRow(
                     "アイコン・テキストを白に固定",
@@ -615,13 +623,28 @@ private fun AppearancePage(viewModel: MediaPlayerViewModel, settings: AppSetting
 
                 Spacer(Modifier.height(4.dp))
 
-                // ===== 背景の色の濃さ =====
+                // ===== 背景の色の濃さ（ライトモード用）=====
                 SettingSliderRow(
                     "背景の色の濃さ（${(settings.animatedBgDarkness * 100).toInt()}%）",
                     settings.animatedBgDarkness, 0.6f..1.0f, 7
                 ) { viewModel.updateSetting(SettingsKeys.ANIMATED_BG_DARKNESS, it) }
                 Text(
-                    "低いほど暗く落ち着いた背景になります。ダークモードのときはさらに自動で暗くなります",
+                    "低いほど暗く落ち着いた背景になります（ライトモード時）",
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurface.copy(0.5f)
+                )
+
+                Spacer(Modifier.height(4.dp))
+
+                // ===== 背景の色の濃さ（ダークモード専用）=====
+                // ★ 以前はダークモード時に自動で×0.75倍暗くしていたが、
+                //   ユーザーが独立して調整できるよう専用スライダーに変更した。
+                SettingSliderRow(
+                    "ダークモード時の背景の色の濃さ（${(settings.animatedBgDarknessDark * 100).toInt()}%）",
+                    settings.animatedBgDarknessDark, 0.25f..1.0f, 14
+                ) { viewModel.updateSetting(SettingsKeys.ANIMATED_BG_DARKNESS_DARK, it) }
+                Text(
+                    "ダークモードのときはこちらの値が使われます（上のスライダーとは独立）",
                     fontSize = 11.sp,
                     color = MaterialTheme.colorScheme.onSurface.copy(0.5f)
                 )
@@ -703,6 +726,48 @@ private fun AppearancePage(viewModel: MediaPlayerViewModel, settings: AppSetting
                 fontSize = 11.sp,
                 color = MaterialTheme.colorScheme.onSurface.copy(0.5f)
             )
+        }
+        SettingSection("背景装飾") {
+            Text(
+                "背景スタイルとは別に、どの背景の上にも重ねられる装飾を追加できます",
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.onSurface.copy(0.5f)
+            )
+            Spacer(Modifier.height(8.dp))
+            SettingDropdownRow(
+                label = "装飾の種類",
+                selectedValue = settings.bgDecorationType,
+                options = listOf(
+                    "none"          to "なし",
+                    "dot_gradient"  to "ドットグラデーション",
+                    "polka_dot"     to "水玉",
+                    "random_shapes" to "ランダム図形"
+                )
+            ) {
+                viewModel.updateSetting(SettingsKeys.BG_DECORATION_TYPE, it)
+            }
+            if (settings.bgDecorationType != "none") {
+                Spacer(Modifier.height(4.dp))
+                SettingRow(label = "装飾の色") {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        listOf("accent" to "アクセントカラー", "white" to "白固定").forEach { (v, label) ->
+                            FilterChip(
+                                selected = settings.bgDecorationColor == v,
+                                onClick = { viewModel.updateSetting(SettingsKeys.BG_DECORATION_COLOR, v) },
+                                label = { Text(label) }
+                            )
+                        }
+                    }
+                }
+                SettingSliderRow(
+                    "不透明度（${(settings.bgDecorationOpacity * 100).toInt()}%）",
+                    settings.bgDecorationOpacity, 0.1f..1.0f, 8
+                ) { viewModel.updateSetting(SettingsKeys.BG_DECORATION_OPACITY, it) }
+                SettingSliderRow(
+                    "大きさ（${"%.1f".format(settings.bgDecorationSize)}倍）",
+                    settings.bgDecorationSize, 0.5f..2.0f, 5
+                ) { viewModel.updateSetting(SettingsKeys.BG_DECORATION_SIZE, it) }
+            }
         }
         SettingSection("バイブレーション") {
             SettingSwitchRow("ボタンを押したときに振動",
@@ -1260,11 +1325,12 @@ private fun TextPage(
 private fun PlayerPage(viewModel: MediaPlayerViewModel, settings: AppSettings, onBack: () -> Unit) {
     SubPageScaffold("再生画面", onBack) {
         SettingSection("シークバー") {
-            SettingSwitchRow("シークバーを波立たせる（UI-Aのみ）",
-                checked = settings.waveSeekBar && settings.playerUiStyle == "A",
-                enabled = settings.playerUiStyle == "A",
+            val waveSupported = settings.playerUiStyle == "A" || settings.playerUiStyle == "D"
+            SettingSwitchRow("シークバーを波立たせる（UI-A・UI-Dのみ）",
+                checked = settings.waveSeekBar && waveSupported,
+                enabled = waveSupported,
                 onCheckedChange = { viewModel.updateSetting(SettingsKeys.WAVE_SEEK_BAR, it) })
-            if (settings.waveSeekBar && settings.playerUiStyle == "A") {
+            if (settings.waveSeekBar && waveSupported) {
                 SettingRow(label = "波のスタイル") {
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         listOf(1 to "シンプル", 2 to "複数波").forEach { (v, label) ->
@@ -1533,8 +1599,9 @@ private fun LyricsPage(
                 SettingRow(label = "背景の色ルール") {
                     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         listOf(
-                            "accent"    to "アクセントカラーから",
-                            "album_art" to "アルバムアートから"
+                            "accent"          to "アクセントカラーから",
+                            "album_art"       to "アルバムアートから",
+                            "blur_album_art"  to "アルバムアートのぼかし＋色"
                         ).forEach { (v, label) ->
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 RadioButton(
