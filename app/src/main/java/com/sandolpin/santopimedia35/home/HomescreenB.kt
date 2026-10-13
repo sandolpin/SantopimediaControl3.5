@@ -55,6 +55,8 @@ import com.sandolpin.santopimedia35.QueueRepeatMode
 import com.sandolpin.santopimedia35.database.AppSettings
 import com.sandolpin.santopimedia35.database.MediaState
 import com.sandolpin.santopimedia35.shareScreenshot
+import com.sandolpin.santopimedia35.home.homescreena.CustomSeekBar
+import com.sandolpin.santopimedia35.home.homescreena.toSeekBarSpec
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateDpAsState
@@ -70,6 +72,14 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.input.pointer.PointerInputChange
+import com.sandolpin.santopimedia35.home.homescreena.AnimatedMeshBackground
+import com.sandolpin.santopimedia35.home.homescreena.BackgroundDecorationLayer
+import com.sandolpin.santopimedia35.home.homescreena.SharedLyricsKeys
+import com.sandolpin.santopimedia35.home.homescreena.SpatialAudioBadge
+import com.sandolpin.santopimedia35.home.homescreena.TrackInfo
+import com.sandolpin.santopimedia35.home.homescreena.WaveformAnimation
+import com.sandolpin.santopimedia35.home.homescreena.sharedElementIfAvailable
+import com.sandolpin.santopimedia35.home.homescreena.vibrateIfEnabled
 
 // =============================================================================
 // UI-B: ミニマルなPlayerScreen（HomeScreenAと同等の機能に対応）
@@ -81,7 +91,7 @@ import androidx.compose.ui.input.pointer.PointerInputChange
 //
 // ■ HomeScreenAと共通の機能
 //   ・背景: default / gradient / blur / color_mix / animated（AGSL・API33+）
-//           動的アニメの色ルール（accent / album_art / blur_album_art）
+//           動的アニメの色ルール（accent / album_art）
 //           曲切り替え時のクロスフェード・白フラッシュ対策
 //   ・背景装飾（ドット / 水玉 / ランダム図形）
 //   ・テキスト・アイコン色の自動判定、ホーム画面アイコン透明度
@@ -105,7 +115,8 @@ private data class HomeScreenBBgSnapshot(
     val blendedArtColor: Color,
     val accentColor: Color,
     val rawAccentColor: Color,
-    val animatedBgColor: Color
+    val animatedBgColor: Color,
+    val meshColors: List<Color>?
 )
 
 // ===== テキストスライド用スナップショット =====
@@ -189,18 +200,27 @@ fun HomeScreenB(
         settings.extractColorFromArt -> mediaState.dominantColor.copy(alpha = 1f)
         else -> MaterialTheme.colorScheme.primary
     }
+    // ★ 動的アニメーション「アルバムアートから」: 抽出済みの [下地, アクセント1, アクセント2] を使う。
+    //   背景が明るい(白っぽいジャケット等)ときは、白固定だと文字が読めなくなるため
+    //   文字・アイコン・アクセントを濃い色に自動で切り替える。
+    val useAgslForFg = isAnimated && android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU
+    val meshColors = if (useAgslForFg) explicitMeshColorsOrNull(settings, mediaState) else null
+    val animatedBgIsLight = meshColors != null && isMeshBackgroundLight(
+        meshColors, settings.animatedBgDarkness, settings.animatedBgDarknessDark, isDark
+    )
+    val animatedFg = animatedForegroundColor(animatedBgIsLight)
     val accentColor = when {
-        isAnimated && settings.animatedWhiteIcon -> Color.White
+        isAnimated && settings.animatedWhiteIcon -> animatedFg
         else -> rawAccentColor
     }
     val animatedBgColor = when (settings.animatedColorSource) {
-        "album_art", "blur_album_art" -> mediaState.blendedArtColor.copy(alpha = 1f)
+        "album_art" -> mediaState.blendedArtColor.copy(alpha = 1f)
         else -> rawAccentColor
     }
 
     // ===== テキスト・アイコン色 =====
     val textColor = when {
-        isAnimated -> Color.White
+        isAnimated -> animatedFg   // 明るい背景のときだけ濃い色（それ以外は従来どおり白）
         isColorMix -> {
             val avgLuminance = (rawAccentColor.luminance() + mediaState.blendedArtColor.luminance()) / 2f
             if (avgLuminance > 0.5f) Color.Black else Color.White
@@ -259,6 +279,7 @@ fun HomeScreenB(
             accentColor = accentColor,
             rawAccentColor = rawAccentColor,
             animatedBgColor = animatedBgColor,
+            meshColors = meshColors,
             isDark = isDark,
             isBlur = isBlur,
             isAnimated = isAnimated
@@ -318,6 +339,7 @@ internal fun HomeScreenBBackground(
     accentColor: Color,
     rawAccentColor: Color,
     animatedBgColor: Color,
+    meshColors: List<Color>?,
     isDark: Boolean,
     isBlur: Boolean,
     isAnimated: Boolean,
@@ -325,7 +347,6 @@ internal fun HomeScreenBBackground(
     val context = LocalContext.current
     val useAgsl = isAnimated && android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU
     val useAnimatedFallback = isAnimated && !useAgsl // API<33 → ぼかしにフォールバック
-    val useBlurAlbumArtBase = isAnimated && settings.animatedColorSource == "blur_album_art"
 
     // Crossfadeのフェードアウト側は「切り替わる前の値」を保持し続ける必要があるため、
     // 背景描画に必要な値だけをスナップショットにまとめて渡す
@@ -334,7 +355,8 @@ internal fun HomeScreenBBackground(
         blendedArtColor = mediaState.blendedArtColor,
         accentColor = accentColor,
         rawAccentColor = rawAccentColor,
-        animatedBgColor = animatedBgColor
+        animatedBgColor = animatedBgColor,
+        meshColors = meshColors
     )
 
     Crossfade(
@@ -344,7 +366,7 @@ internal fun HomeScreenBBackground(
     ) { snap ->
         Box(modifier = Modifier.fillMaxSize()) {
             // ===== ぼかし背景 =====
-            val showBlurBase = isBlur || useAnimatedFallback || (useAgsl && useBlurAlbumArtBase)
+            val showBlurBase = isBlur || useAnimatedFallback
             if (showBlurBase) {
                 // 画像読み込み中は透明のままになり白が透けるため、アクセントカラーを下敷きにする
                 Box(modifier = Modifier.fillMaxSize().background(snap.rawAccentColor))
@@ -382,7 +404,7 @@ internal fun HomeScreenBBackground(
                     darkModeDarkness = settings.animatedBgDarknessDark,
                     colorPattern = settings.animatedColorPattern,
                     isDarkTheme = isDark,
-                    alpha = if (useBlurAlbumArtBase) 0.62f else 1f,
+                    explicitColors = snap.meshColors,
                     modifier = Modifier.fillMaxSize()
                 )
             }
@@ -610,14 +632,18 @@ private fun HomeScreenBControls(
                     .fillMaxWidth(if (compact) 0.35f else 0.22f)
             )
             Spacer(modifier = Modifier.height(if (compact) 10.dp else 14.dp))
+        } else {
+            // 波形を非表示にしても、波形があった場所の高さは空けたままにする
+            Spacer(modifier = Modifier.height(if (compact) 22.dp else 28.dp))
         }
 
         // ===== シークバー（UI-Bは波状非対応 → 通常のみ）=====
-        SeekBarB(
+        CustomSeekBar(
             progress = mediaState.progress,
             onProgressChange = { viewModel.seekTo(it) },
-            thickness = settings.seekBarThickness.dp,
             color = style.accentColor,
+            spec = settings.toSeekBarSpec(),
+            isPlaying = mediaState.isPlaying,
             durationMs = mediaState.durationMs
         )
 

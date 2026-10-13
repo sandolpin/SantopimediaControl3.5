@@ -45,15 +45,20 @@ import coil.compose.AsyncImage
 import com.sandolpin.santopimedia35.LyricItem
 import com.sandolpin.santopimedia35.LyricsState
 import com.sandolpin.santopimedia35.MediaPlayerViewModel
-import com.sandolpin.santopimedia35.PlainLyricsView
 import com.sandolpin.santopimedia35.QueueItemRow
-import com.sandolpin.santopimedia35.SyncedLyricsView
 import com.sandolpin.santopimedia35.database.AppSettings
 import com.sandolpin.santopimedia35.database.MediaState
 import com.sandolpin.santopimedia35.database.QueueItem
 import com.sandolpin.santopimedia35.database.SettingsKeys
 import com.sandolpin.santopimedia35.favorite.FavoriteViewModel
 import com.sandolpin.santopimedia35.fetchLyricsWithLocal
+import com.sandolpin.santopimedia35.home.homescreena.AlbumArtCard
+import com.sandolpin.santopimedia35.home.homescreena.AnimatedMeshBackground
+import com.sandolpin.santopimedia35.home.homescreena.BackgroundDecorationLayer
+import com.sandolpin.santopimedia35.home.homescreena.CustomSeekBar
+import com.sandolpin.santopimedia35.home.homescreena.toSeekBarSpec
+import com.sandolpin.santopimedia35.lyricsscreen.PlainLyricsView
+import com.sandolpin.santopimedia35.lyricsscreen.SyncedLyricsView
 import com.sandolpin.santopimedia35.remember.HistoryCard
 import com.sandolpin.santopimedia35.remember.HistoryViewModel
 import kotlinx.coroutines.Job
@@ -126,8 +131,8 @@ fun HomeScreenC(
         HomeScreenCBackground(mediaState = mediaState, settings = settings)
 
         // ===== 背景装飾（ドット/水玉/ランダム図形。どの背景スタイルにも重ねられる独立レイヤー）=====
-        // ★ BackgroundDecorationLayerはHomescreenA.ktに定義されているが、
-        //   同じパッケージ(com.sandolpin.santopimedia35.home)のためimport不要で使える。
+        // ★ BackgroundDecorationLayerはhomescreena/BackgroundDecoration.ktに定義されているが、
+        //   homescreena サブパッケージに移動したため、上のimportで参照している。
         if (settings.bgDecorationType != "none") {
             val decorAccentColor = if (settings.extractColorFromArt)
                 mediaState.dominantColor.copy(alpha = 1f) else MaterialTheme.colorScheme.primary
@@ -281,11 +286,6 @@ private fun HomeScreenCBackground(mediaState: MediaState, settings: AppSettings)
     val isAnimated = settings.backgroundStyle == "animated"
     val useAgsl = isAnimated && android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU
     val useAnimatedFallback = isAnimated && !useAgsl // API<33 → ぼかしにフォールバック
-    // ★ HomescreenA.ktと同じ考え方: 動的アニメーションの色ルールで
-    //   「アルバムアートのぼかし＋アルバムアートの色」を選んだ場合、
-    //   ぼかしたアルバムアートを下地に敷いた上で動的アニメーションを半透明で重ねる。
-    val useBlurAlbumArtBase = isAnimated && settings.animatedColorSource == "blur_album_art"
-
     val isDark = when (settings.themeMode) {
         "dark"  -> true
         "light" -> false
@@ -297,11 +297,11 @@ private fun HomeScreenCBackground(mediaState: MediaState, settings: AppSettings)
         else -> MaterialTheme.colorScheme.primary
     }
     val animatedBgColor = when (settings.animatedColorSource) {
-        "album_art", "blur_album_art" -> mediaState.blendedArtColor.copy(alpha = 1f)
+        "album_art" -> mediaState.blendedArtColor.copy(alpha = 1f)
         else -> rawAccentColor
     }
 
-    val showBlurBase = isBlur || useAnimatedFallback || (useAgsl && useBlurAlbumArtBase)
+    val showBlurBase = isBlur || useAnimatedFallback
     if (showBlurBase && mediaState.albumArtUri != null) {
         AsyncImage(
             model = mediaState.albumArtUri,
@@ -330,7 +330,7 @@ private fun HomeScreenCBackground(mediaState: MediaState, settings: AppSettings)
             darkModeDarkness = settings.animatedBgDarknessDark,
             colorPattern = settings.animatedColorPattern,
             isDarkTheme = isDark,
-            alpha = if (useBlurAlbumArtBase) 0.62f else 1f,
+            explicitColors = explicitMeshColorsOrNull(settings, mediaState),
             modifier = Modifier.fillMaxSize()
         )
     }
@@ -489,6 +489,7 @@ private fun CompactPlayerPane(
                 viewModel = viewModel,
                 mediaState = mediaState,
                 accentColor = accentColor,
+                settings = settings,
                 onLongPressPlay = onLongPressPlay,
                 boxMaxWidth = maxWidth,
                 boxMaxHeight = maxHeight
@@ -513,6 +514,7 @@ private fun ExpandedPlayerContent(
     viewModel: MediaPlayerViewModel,
     mediaState: MediaState,
     accentColor: Color,
+    settings: AppSettings,
     onLongPressPlay: () -> Unit,
     boxMaxWidth: androidx.compose.ui.unit.Dp,
     boxMaxHeight: androidx.compose.ui.unit.Dp,
@@ -571,12 +573,14 @@ private fun ExpandedPlayerContent(
         Spacer(Modifier.height(14.dp))
 
         // ===== シークバー =====
-        NormalSeekBar(
+        CustomSeekBar(
             progress = mediaState.progress,
             onProgressChange = { viewModel.seekTo(it) },
-            thickness = 4.dp,
             color = accentColor,
-            durationMs = mediaState.durationMs
+            spec = settings.toSeekBarSpec(),
+            isPlaying = mediaState.isPlaying,
+            durationMs = mediaState.durationMs,
+            maxThickness = 6.dp
         )
 
         Spacer(Modifier.height(4.dp))
@@ -719,12 +723,14 @@ private fun CompactPlayerContent(
         Spacer(Modifier.height(10.dp))
 
         // ===== シークバー =====
-        NormalSeekBar(
+        CustomSeekBar(
             progress = mediaState.progress,
             onProgressChange = { viewModel.seekTo(it) },
-            thickness = 4.dp,
             color = accentColor,
-            durationMs = mediaState.durationMs
+            spec = settings.toSeekBarSpec(),
+            isPlaying = mediaState.isPlaying,
+            durationMs = mediaState.durationMs,
+            maxThickness = 6.dp
         )
 
         Spacer(Modifier.height(4.dp))
@@ -824,14 +830,32 @@ private fun CompactLyricsPane(
     // ★ HomeScreenCの背景が「ぼかし」または「動的アニメーション」のときは、
     //   LyricsScreen.kt(通常の歌詞画面)と同じ理由で背景が暗くなるため、
     //   アクセントカラーのままだと視認性が落ちる。アクティブ行の色を白に固定する。
-    val isDarkBg = settings.backgroundStyle == "blur" || settings.backgroundStyle == "animated"
+    // ★ 動的アニメーション「アルバムアートから」で背景が明るい（白っぽいジャケット等）ときは、
+    //   白い歌詞だと読めないため「暗い背景」扱いにせず、濃い色の歌詞にする。
+    val isDarkTheme = when (settings.themeMode) {
+        "dark"  -> true
+        "light" -> false
+        else    -> isSystemInDarkTheme()
+    }
+    val meshColors = if (settings.backgroundStyle == "animated" &&
+        android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU
+    ) explicitMeshColorsOrNull(settings, mediaState) else null
+    val isLightAnimatedBg = meshColors != null && isMeshBackgroundLight(
+        meshColors, settings.animatedBgDarkness, settings.animatedBgDarknessDark, isDarkTheme
+    )
+    val isDarkBg = (settings.backgroundStyle == "blur" || settings.backgroundStyle == "animated") &&
+            !isLightAnimatedBg
     val accentColor = when {
         isDarkBg -> Color.White
+        isLightAnimatedBg -> AnimatedFgDark
         settings.extractColorFromArt -> mediaState.dominantColor.copy(alpha = 1f)
         else -> MaterialTheme.colorScheme.primary
     }
-    val inactiveColor = if (isDarkBg) Color.White.copy(alpha = 0.35f)
-    else MaterialTheme.colorScheme.onSurface.copy(0.35f)
+    val inactiveColor = when {
+        isDarkBg -> Color.White.copy(alpha = 0.35f)
+        isLightAnimatedBg -> AnimatedFgDark.copy(alpha = 0.35f)
+        else -> MaterialTheme.colorScheme.onSurface.copy(0.35f)
+    }
 
     Box(modifier = Modifier.fillMaxSize()) {
         when (val state = lyricsState) {
@@ -1107,7 +1131,7 @@ private fun HomeScreenCQuickMenu(
                 QuickMenuSectionLabel("ホームスタイルのきりかえ")
                 Spacer(Modifier.height(8.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    listOf("A", "B", "C").forEach { style ->
+                    listOf("A", "B", "C", "D").forEach { style ->
                         val selected = settings.playerUiStyle == style
                         FilterChip(
                             selected = selected,

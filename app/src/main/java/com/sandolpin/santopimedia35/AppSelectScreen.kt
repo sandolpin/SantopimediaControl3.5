@@ -40,7 +40,7 @@ import coil.request.ImageRequest
 import coil.request.SuccessResult
 import com.sandolpin.santopimedia35.database.AppSettings
 import com.sandolpin.santopimedia35.database.MediaState
-import com.sandolpin.santopimedia35.home.NormalSeekBar
+import com.sandolpin.santopimedia35.home.homescreena.NormalSeekBar
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 

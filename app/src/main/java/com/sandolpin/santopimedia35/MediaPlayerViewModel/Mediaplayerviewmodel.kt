@@ -16,6 +16,7 @@ import android.media.session.MediaSession
 import android.media.session.MediaSessionManager
 import android.media.session.PlaybackState
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
 import androidx.core.content.ContextCompat
 import androidx.datastore.preferences.core.Preferences
 import androidx.lifecycle.ViewModel
@@ -323,6 +324,8 @@ class MediaPlayerViewModel(
         _mediaState.value = state.copy(
             dominantColor = _mediaState.value.dominantColor,
             blendedArtColor = _mediaState.value.blendedArtColor,
+            artMeshColors = _mediaState.value.artMeshColors,
+            artMeshPalettes = _mediaState.value.artMeshPalettes,
             volume = _mediaState.value.volume
         )
         _activeSessions.value = _activeSessions.value.map {
@@ -395,6 +398,24 @@ class MediaPlayerViewModel(
         val hash = bitmap.generationId
         if (hash == lastBitmapHash) return
         lastBitmapHash = hash
+
+        // ===== 動的アニメーション背景「アルバムアートから」専用の色抽出 =====
+        // ★ 標準のPaletteは白・黒に近い色を除外する（clearFilters()で解除）。
+        //   白背景のジャケットでも「白」を下地として拾えるようにするため。
+        //   色数も多め(32)にして、小さなアクセント色が他の色に飲み込まれないようにする。
+        Palette.from(bitmap)
+            .maximumColorCount(32)
+            .clearFilters()
+            .generate { meshPalette ->
+                // 5パターンすべてを一度に計算して保持する（設定を変えたとき即反映するため）
+                val palettes = (1..5).map { computeArtMeshColors(meshPalette, it) }
+                if (palettes.all { it.size >= 3 } && _mediaState.value.artMeshPalettes != palettes) {
+                    _mediaState.value = _mediaState.value.copy(
+                        artMeshColors = palettes[0],
+                        artMeshPalettes = palettes
+                    )
+                }
+            }
 
         Palette.from(bitmap).generate { palette ->
             val s = settings.value
@@ -498,6 +519,129 @@ class MediaPlayerViewModel(
         val g = (gSum / totalWeight).toInt().coerceIn(0, 255)
         val b = (bSum / totalWeight).toInt().coerceIn(0, 255)
         return Color(AndroidColor.rgb(r, g, b))
+    }
+    /**
+     * 動的アニメーション背景「アルバムアートから」専用の色抽出（5パターン）。
+     * 返す値: [色1(広く出る下地側), 色2, 色3]
+     *
+     *  1 おまかせ : 一番広い色=下地 + 鮮やかで下地と違う色2つ=アクセント
+     *  2 鮮やか   : 彩度の高い色だけ3つ（下地の白・黒は使わない）。彩度を1.35倍
+     *  3 そのまま : 面積の大きい順に似ていない3色を補正なしで
+     *  4 淡い     : 1 を白寄りに混ぜてパステル調に
+     *  5 深い     : 1 を暗く・やや濃くして落ち着いた色に
+     *
+     * 共通: Paletteの標準フィルタは外してある（呼び出し側）ので、白・黒も候補に残る。
+     */
+    private fun computeArtMeshColors(palette: Palette?, pattern: Int = 1): List<Color> {
+        val swatches = palette?.swatches?.filter { it.population > 0 } ?: return emptyList()
+        if (swatches.isEmpty()) return emptyList()
+        val totalPop = swatches.sumOf { it.population }.toFloat()
+
+        fun hsvOf(rgb: Int): FloatArray = FloatArray(3).also { AndroidColor.colorToHSV(rgb, it) }
+        fun rgbDist(a: Int, b: Int): Float {
+            val dr = (AndroidColor.red(a) - AndroidColor.red(b)).toFloat()
+            val dg = (AndroidColor.green(a) - AndroidColor.green(b)).toFloat()
+            val db = (AndroidColor.blue(a) - AndroidColor.blue(b)).toFloat()
+            return kotlin.math.sqrt(dr * dr + dg * dg + db * db)
+        }
+        fun hueDist(a: Float, b: Float): Float {
+            val d = kotlin.math.abs(a - b)
+            return kotlin.math.min(d, 360f - d)
+        }
+        // 彩度を satMul 倍し、明度を minV〜1 に収める
+        fun tune(rgb: Int, satMul: Float, minV: Float): Color {
+            val hsv = hsvOf(rgb)
+            hsv[1] = (hsv[1] * satMul).coerceIn(0f, 1f)
+            hsv[2] = hsv[2].coerceIn(minV, 1f)
+            return Color(AndroidColor.HSVToColor(hsv))
+        }
+        // 鮮やかさ・面積のスコア（√で面積を効かせ、小さくても鮮やかな色が選ばれるようにする）
+        fun score(s: Palette.Swatch): Float {
+            val hsv = hsvOf(s.rgb)
+            return kotlin.math.sqrt(s.population / totalPop) * (0.4f + hsv[1]) * (0.5f + hsv[2] * 0.5f)
+        }
+        fun isChromatic(s: Palette.Swatch): Boolean {
+            val hsv = hsvOf(s.rgb)
+            return hsv[1] >= 0.22f && hsv[2] >= 0.30f
+        }
+        // 色相が離れた順に最大 n 個を選ぶ（青と赤のように違う色を混ぜるため）
+        fun pickDistinctHues(sorted: List<Palette.Swatch>, n: Int): List<Palette.Swatch> {
+            val out = mutableListOf<Palette.Swatch>()
+            for (s in sorted) {
+                if (out.size >= n) break
+                if (out.none { hueDist(hsvOf(it.rgb)[0], hsvOf(s.rgb)[0]) < 40f }) out += s
+            }
+            if (out.size < n) for (s in sorted) {
+                if (out.size >= n) break
+                if (s !in out) out += s
+            }
+            return out
+        }
+        // 白に向けて t だけ混ぜる
+        fun towardWhite(c: Color, t: Float) =
+            Color(c.red + (1f - c.red) * t, c.green + (1f - c.green) * t, c.blue + (1f - c.blue) * t)
+        // 暗くして彩度を少し足す
+        fun deepen(c: Color, v: Float): Color {
+            val hsv = FloatArray(3)
+            AndroidColor.colorToHSV(c.toArgb(), hsv)
+            hsv[1] = (hsv[1] * 1.1f).coerceIn(0f, 1f)
+            hsv[2] = (hsv[2] * v).coerceIn(0f, 1f)
+            return Color(AndroidColor.HSVToColor(hsv))
+        }
+
+        // ===== パターン1（おまかせ）: 他のパターンの土台にもなる =====
+        fun auto(): List<Color> {
+            val baseSwatch = swatches.maxByOrNull { it.population } ?: return emptyList()
+            val baseRgb = baseSwatch.rgb
+            val baseHsv = hsvOf(baseRgb)
+            val baseIsNeutral = baseHsv[1] < 0.15f
+            val candidates = swatches
+                .filter { s ->
+                    s !== baseSwatch && isChromatic(s) &&
+                            (baseIsNeutral || rgbDist(s.rgb, baseRgb) >= 70f)
+                }
+                .sortedByDescending { score(it) }
+            val a1 = candidates.firstOrNull()
+            val accents: Pair<Color, Color> = if (a1 == null) {
+                // 色味のない画像: 下地を暗くした2色で代用
+                val d1 = baseHsv.copyOf().also { it[2] = it[2] * 0.82f }
+                val d2 = baseHsv.copyOf().also { it[2] = it[2] * 0.64f }
+                Color(AndroidColor.HSVToColor(d1)) to Color(AndroidColor.HSVToColor(d2))
+            } else {
+                val h1 = hsvOf(a1.rgb)[0]
+                val a2 = candidates.drop(1).firstOrNull { hueDist(hsvOf(it.rgb)[0], h1) >= 40f }
+                    ?: candidates.getOrNull(1)
+                if (a2 == null) {
+                    val shifted = hsvOf(a1.rgb).also { it[0] = (it[0] + 35f) % 360f }
+                    tune(a1.rgb, 1.2f, 0.45f) to tune(AndroidColor.HSVToColor(shifted), 1.2f, 0.45f)
+                } else tune(a1.rgb, 1.2f, 0.45f) to tune(a2.rgb, 1.2f, 0.45f)
+            }
+            return listOf(Color(baseRgb), accents.first, accents.second)
+        }
+
+        return when (pattern) {
+            2 -> {
+                // 鮮やか: 彩度の高い色だけで3色。足りなければ「おまかせ」を鮮やかにして補う
+                val vivid = pickDistinctHues(swatches.filter { isChromatic(it) }.sortedByDescending { score(it) }, 3)
+                if (vivid.size >= 3) vivid.map { tune(it.rgb, 1.35f, 0.5f) }
+                else auto().map { tune(it.toArgb(), 1.35f, 0.5f) }
+            }
+            3 -> {
+                // そのまま: 面積の大きい順に、互いに似ていない3色
+                val picked = mutableListOf<Palette.Swatch>()
+                for (s in swatches.sortedByDescending { it.population }) {
+                    if (picked.size >= 3) break
+                    if (picked.none { rgbDist(it.rgb, s.rgb) < 45f }) picked += s
+                }
+                val colors = picked.map { Color(it.rgb) }.toMutableList()
+                // 色数が足りない画像は、先頭色を暗くして補う
+                while (colors.size < 3) colors += deepen(colors.first(), if (colors.size == 1) 0.8f else 0.62f)
+                colors
+            }
+            4 -> auto().mapIndexed { i, c -> towardWhite(c, if (i == 0) 0.15f else 0.40f) }
+            5 -> auto().mapIndexed { i, c -> deepen(c, if (i == 0) 0.50f else 0.70f) }
+            else -> auto()
+        }
     }
 
     /**

@@ -53,7 +53,16 @@ import com.sandolpin.santopimedia35.MediaPlayerViewModel
 import com.sandolpin.santopimedia35.QueueRepeatMode
 import com.sandolpin.santopimedia35.database.AppSettings
 import com.sandolpin.santopimedia35.database.MediaState
+import com.sandolpin.santopimedia35.home.homescreena.BackgroundDecorationLayer
+import com.sandolpin.santopimedia35.home.homescreena.SharedLyricsKeys
+import com.sandolpin.santopimedia35.home.homescreena.SpatialAudioBadge
+import com.sandolpin.santopimedia35.home.homescreena.TrackInfo
+import com.sandolpin.santopimedia35.home.homescreena.WaveSeekBar
+import com.sandolpin.santopimedia35.home.homescreena.WaveformAnimation
+import com.sandolpin.santopimedia35.home.homescreena.sharedElementIfAvailable
 import com.sandolpin.santopimedia35.shareScreenshot
+import com.sandolpin.santopimedia35.home.homescreena.CustomSeekBar
+import com.sandolpin.santopimedia35.home.homescreena.toSeekBarSpec
 
 // =============================================================================
 // UI-D: 「アルバムアートがグラデーションで背景に溶け込む」高級感のあるPlayerScreen
@@ -167,16 +176,25 @@ fun HomeScreenD(
         settings.extractColorFromArt -> mediaState.dominantColor.copy(alpha = 1f)
         else -> MaterialTheme.colorScheme.primary
     }
+    // ★ 動的アニメーション「アルバムアートから」: 抽出済みの [下地, アクセント1, アクセント2] を使う。
+    //   背景が明るい(白っぽいジャケット等)ときは、白固定だと文字が読めなくなるため
+    //   文字・アイコン・アクセントを濃い色に自動で切り替える。
+    val useAgslForFg = isAnimated && android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU
+    val meshColors = if (useAgslForFg) explicitMeshColorsOrNull(settings, mediaState) else null
+    val animatedBgIsLight = meshColors != null && isMeshBackgroundLight(
+        meshColors, settings.animatedBgDarkness, settings.animatedBgDarknessDark, isDark
+    )
+    val animatedFg = animatedForegroundColor(animatedBgIsLight)
     val accentColor = when {
-        isAnimated && settings.animatedWhiteIcon -> Color.White
+        isAnimated && settings.animatedWhiteIcon -> animatedFg
         else -> rawAccentColor
     }
     val animatedBgColor = when (settings.animatedColorSource) {
-        "album_art", "blur_album_art" -> mediaState.blendedArtColor.copy(alpha = 1f)
+        "album_art" -> mediaState.blendedArtColor.copy(alpha = 1f)
         else -> rawAccentColor
     }
     val textColor = when {
-        isAnimated -> Color.White
+        isAnimated -> animatedFg   // 明るい背景のときだけ濃い色（それ以外は従来どおり白）
         isColorMix -> {
             val avg = (rawAccentColor.luminance() + mediaState.blendedArtColor.luminance()) / 2f
             if (avg > 0.5f) Color.Black else Color.White
@@ -226,6 +244,7 @@ fun HomeScreenD(
             accentColor = accentColor,
             rawAccentColor = rawAccentColor,
             animatedBgColor = animatedBgColor,
+            meshColors = meshColors,
             isDark = isDark,
             isBlur = isBlur,
             isAnimated = isAnimated
@@ -400,6 +419,9 @@ private fun HomeScreenDControls(
                     .fillMaxWidth(if (compact) 0.35f else 0.22f)
             )
             Spacer(Modifier.height(if (compact) 8.dp else 12.dp))
+        } else {
+            // 波形を非表示にしても、波形があった場所の高さは空けたままにする
+            Spacer(Modifier.height(if (compact) 20.dp else 26.dp))
         }
 
         // ===== 曲情報（左寄せ）＋ 右側に丸ボタン（お気に入り・…）=====
@@ -470,25 +492,14 @@ private fun HomeScreenDControls(
         Spacer(Modifier.height(if (compact) 12.dp else 18.dp))
 
         // ===== シークバー（設定で波状/通常を切り替え）=====
-        if (settings.waveSeekBar) {
-            WaveSeekBar(
-                progress = mediaState.progress,
-                onProgressChange = { viewModel.seekTo(it) },
-                thickness = settings.seekBarThickness.dp,
-                color = style.accentColor,
-                style = settings.waveSeekBarStyle,
-                isPlaying = mediaState.isPlaying,
-                durationMs = mediaState.durationMs
-            )
-        } else {
-            SeekBarB(
-                progress = mediaState.progress,
-                onProgressChange = { viewModel.seekTo(it) },
-                thickness = settings.seekBarThickness.dp,
-                color = style.accentColor,
-                durationMs = mediaState.durationMs
-            )
-        }
+        CustomSeekBar(
+            progress = mediaState.progress,
+            onProgressChange = { viewModel.seekTo(it) },
+            color = style.accentColor,
+            spec = settings.toSeekBarSpec(),
+            isPlaying = mediaState.isPlaying,
+            durationMs = mediaState.durationMs
+        )
 
         Spacer(Modifier.height(6.dp))
 

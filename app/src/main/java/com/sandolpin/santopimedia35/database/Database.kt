@@ -43,6 +43,16 @@ data class AppSettings(
     val seekBarUpdateInterval: Float = 0.5f,   // 0.1 / 0.3 / 0.5 / 1.0 / 0(なし)
     val showWaveform: Boolean = true,
     val showVolumeBar: Boolean = true,
+    // シークバーのカスタマイズ（全ホーム画面共通）
+    val seekCapsuleEnabled: Boolean = true,    // ① カプセルを表示
+    val seekCapsuleStyle: Int = 1,             //   1=トラック付き / 2=フラット
+    val seekUnplayedEnabled: Boolean = true,   // ② 未再生部分を表示（OFFはカプセル有効時のみ）
+    val seekUnplayedStyle: String = "dashed",  //   "solid"=実線 / "dashed"=破線 / "dotted"=点線
+    val seekTipEnabled: Boolean = false,       // ③ 先端の装飾
+    val seekTipStyle: String = "bar",          //   "bar"=縦棒 / "dot"=丸 / "arrow"=矢印
+    val seekTipBarScale: Float = 1.0f,         //   縦棒の縦幅の倍率 0.5〜2.0
+    val seekTipSize: Float = 1.0f,             //   装飾の全体的な大きさ(倍率) 0.5〜2.0
+    val seekThickenOnDrag: Boolean = true,     // 調整中に幅を太くする
 
     // キュー画面
     val queueShowMiniPlayer: Boolean = true,
@@ -121,6 +131,7 @@ data class AppSettings(
     val animatedColorSource: String = "accent", // "accent"=アクセントカラーから / "album_art"=アルバムアートから強制
     val animatedBgDarkness: Float = 0.88f,      // 背景の色の濃さ(明るさ倍率) 0.6〜1.0。低いほど暗い
     val animatedColorPattern: String = "normal", // 色の混ぜ方: "soft"/"normal"/"vivid"/"complementary"
+    val animatedExtractPattern: Int = 1,
 
     // 履歴画面
     val historyCardBackgroundStyle: String = "blur", // "blur"=アルバムアートのぼかし / "animated"=複数色ミックス / "color_fill"=アルバムアート色で塗りつぶし
@@ -186,6 +197,15 @@ object SettingsKeys {
     val SEEK_BAR_UPDATE_INTERVAL = floatPreferencesKey("seek_bar_update_interval")
     val SHOW_WAVEFORM = booleanPreferencesKey("show_waveform")
     val SHOW_VOLUME_BAR = booleanPreferencesKey("show_volume_bar")
+    val SEEK_CAPSULE_ENABLED = booleanPreferencesKey("seek_capsule_enabled")
+    val SEEK_CAPSULE_STYLE = intPreferencesKey("seek_capsule_style")
+    val SEEK_UNPLAYED_ENABLED = booleanPreferencesKey("seek_unplayed_enabled")
+    val SEEK_UNPLAYED_STYLE = stringPreferencesKey("seek_unplayed_style")
+    val SEEK_TIP_ENABLED = booleanPreferencesKey("seek_tip_enabled")
+    val SEEK_TIP_STYLE = stringPreferencesKey("seek_tip_style")
+    val SEEK_TIP_BAR_SCALE = floatPreferencesKey("seek_tip_bar_scale")
+    val SEEK_TIP_SIZE = floatPreferencesKey("seek_tip_size")
+    val SEEK_THICKEN_ON_DRAG = booleanPreferencesKey("seek_thicken_on_drag")
 
     val QUEUE_SHOW_MINI_PLAYER = booleanPreferencesKey("queue_show_mini_player")
     val QUEUE_SWIPE_FROM_HOME = booleanPreferencesKey("queue_swipe_from_home")
@@ -232,6 +252,7 @@ object SettingsKeys {
     val ANIMATED_COLOR_SOURCE = stringPreferencesKey("animated_color_source")
     val ANIMATED_BG_DARKNESS = floatPreferencesKey("animated_bg_darkness")
     val ANIMATED_COLOR_PATTERN = stringPreferencesKey("animated_color_pattern")
+    val ANIMATED_EXTRACT_PATTERN = intPreferencesKey("animated_extract_pattern")
     val FAVORITE_SHOW_ITEM = stringPreferencesKey("favorite_show_item")
     val FAVORITE_DISPLAY_MODE = stringPreferencesKey("favorite_display_mode")
     val FAVORITE_GRID_COLUMNS = intPreferencesKey("favorite_grid_columns")
@@ -290,6 +311,15 @@ class SettingsRepository(private val context: Context) {
             seekBarUpdateInterval = prefs[SettingsKeys.SEEK_BAR_UPDATE_INTERVAL] ?: 0.5f,
             showWaveform = prefs[SettingsKeys.SHOW_WAVEFORM] ?: true,
             showVolumeBar = prefs[SettingsKeys.SHOW_VOLUME_BAR] ?: true,
+            seekCapsuleEnabled = prefs[SettingsKeys.SEEK_CAPSULE_ENABLED] ?: true,
+            seekCapsuleStyle = prefs[SettingsKeys.SEEK_CAPSULE_STYLE] ?: 1,
+            seekUnplayedEnabled = prefs[SettingsKeys.SEEK_UNPLAYED_ENABLED] ?: true,
+            seekUnplayedStyle = prefs[SettingsKeys.SEEK_UNPLAYED_STYLE] ?: "dashed",
+            seekTipEnabled = prefs[SettingsKeys.SEEK_TIP_ENABLED] ?: false,
+            seekTipStyle = prefs[SettingsKeys.SEEK_TIP_STYLE] ?: "bar",
+            seekTipBarScale = prefs[SettingsKeys.SEEK_TIP_BAR_SCALE] ?: 1.0f,
+            seekTipSize = prefs[SettingsKeys.SEEK_TIP_SIZE] ?: 1.0f,
+            seekThickenOnDrag = prefs[SettingsKeys.SEEK_THICKEN_ON_DRAG] ?: true,
 
             queueShowMiniPlayer = prefs[SettingsKeys.QUEUE_SHOW_MINI_PLAYER] ?: true,
             queueSwipeFromHome = prefs[SettingsKeys.QUEUE_SWIPE_FROM_HOME] ?: false,
@@ -334,9 +364,11 @@ class SettingsRepository(private val context: Context) {
             favoriteViewStyle = prefs[SettingsKeys.FAVORITE_VIEW_STYLE] ?: "list",
             favoriteWarningDismissed = prefs[SettingsKeys.FAVORITE_WARNING_DISMISSED] ?: false,
             animatedWhiteIcon = prefs[SettingsKeys.ANIMATED_WHITE_ICON] ?: true,
-            animatedColorSource = prefs[SettingsKeys.ANIMATED_COLOR_SOURCE] ?: "accent",
+            animatedColorSource = (prefs[SettingsKeys.ANIMATED_COLOR_SOURCE] ?: "accent")
+                .let { if (it == "blur_album_art") "album_art" else it },
             animatedBgDarkness = prefs[SettingsKeys.ANIMATED_BG_DARKNESS] ?: 0.88f,
             animatedColorPattern = prefs[SettingsKeys.ANIMATED_COLOR_PATTERN] ?: "normal",
+            animatedExtractPattern = prefs[SettingsKeys.ANIMATED_EXTRACT_PATTERN] ?: 1,
             favoriteShowItem = prefs[SettingsKeys.FAVORITE_SHOW_ITEM] ?: "album",
             favoriteDisplayMode = prefs[SettingsKeys.FAVORITE_DISPLAY_MODE] ?: "list",
             favoriteGridColumns = prefs[SettingsKeys.FAVORITE_GRID_COLUMNS] ?: 2,
@@ -457,6 +489,15 @@ object SettingsBackup {
         o.putFloat("seekBarUpdateInterval", s.seekBarUpdateInterval)
         o.put("showWaveform", s.showWaveform)
         o.put("showVolumeBar", s.showVolumeBar)
+        o.put("seekCapsuleEnabled", s.seekCapsuleEnabled)
+        o.put("seekCapsuleStyle", s.seekCapsuleStyle)
+        o.put("seekUnplayedEnabled", s.seekUnplayedEnabled)
+        o.put("seekUnplayedStyle", s.seekUnplayedStyle)
+        o.put("seekTipEnabled", s.seekTipEnabled)
+        o.put("seekTipStyle", s.seekTipStyle)
+        o.putFloat("seekTipBarScale", s.seekTipBarScale)
+        o.putFloat("seekTipSize", s.seekTipSize)
+        o.put("seekThickenOnDrag", s.seekThickenOnDrag)
 
         // キュー画面
         o.put("queueShowMiniPlayer", s.queueShowMiniPlayer)
@@ -530,6 +571,7 @@ object SettingsBackup {
         o.put("animatedColorSource", s.animatedColorSource)
         o.putFloat("animatedBgDarkness", s.animatedBgDarkness)
         o.put("animatedColorPattern", s.animatedColorPattern)
+        o.put("animatedExtractPattern", s.animatedExtractPattern)
 
         // 履歴画面
         o.put("historyCardBackgroundStyle", s.historyCardBackgroundStyle)
@@ -600,6 +642,15 @@ object SettingsBackup {
             seekBarUpdateInterval = o.floatOrDefault("seekBarUpdateInterval", base.seekBarUpdateInterval),
             showWaveform = o.boolOrDefault("showWaveform", base.showWaveform),
             showVolumeBar = o.boolOrDefault("showVolumeBar", base.showVolumeBar),
+            seekCapsuleEnabled = o.boolOrDefault("seekCapsuleEnabled", base.seekCapsuleEnabled),
+            seekCapsuleStyle = o.intOrDefault("seekCapsuleStyle", base.seekCapsuleStyle),
+            seekUnplayedEnabled = o.boolOrDefault("seekUnplayedEnabled", base.seekUnplayedEnabled),
+            seekUnplayedStyle = o.stringOrDefault("seekUnplayedStyle", base.seekUnplayedStyle),
+            seekTipEnabled = o.boolOrDefault("seekTipEnabled", base.seekTipEnabled),
+            seekTipStyle = o.stringOrDefault("seekTipStyle", base.seekTipStyle),
+            seekTipBarScale = o.floatOrDefault("seekTipBarScale", base.seekTipBarScale),
+            seekTipSize = o.floatOrDefault("seekTipSize", base.seekTipSize),
+            seekThickenOnDrag = o.boolOrDefault("seekThickenOnDrag", base.seekThickenOnDrag),
 
             queueShowMiniPlayer = o.boolOrDefault("queueShowMiniPlayer", base.queueShowMiniPlayer),
             queueSwipeFromHome = o.boolOrDefault("queueSwipeFromHome", base.queueSwipeFromHome),
@@ -657,9 +708,11 @@ object SettingsBackup {
             favoriteColorFill = o.boolOrDefault("favoriteColorFill", base.favoriteColorFill),
 
             animatedWhiteIcon = o.boolOrDefault("animatedWhiteIcon", base.animatedWhiteIcon),
-            animatedColorSource = o.stringOrDefault("animatedColorSource", base.animatedColorSource),
+            animatedColorSource = o.stringOrDefault("animatedColorSource", base.animatedColorSource)
+                .let { if (it == "blur_album_art") "album_art" else it },
             animatedBgDarkness = o.floatOrDefault("animatedBgDarkness", base.animatedBgDarkness),
             animatedColorPattern = o.stringOrDefault("animatedColorPattern", base.animatedColorPattern),
+            animatedExtractPattern = o.intOrDefault("animatedExtractPattern", base.animatedExtractPattern),
 
             historyCardBackgroundStyle = o.stringOrDefault("historyCardBackgroundStyle", base.historyCardBackgroundStyle),
             historyTimeDisplayMode = o.stringOrDefault("historyTimeDisplayMode", base.historyTimeDisplayMode),
@@ -716,6 +769,15 @@ object SettingsBackup {
         prefs[SettingsKeys.SEEK_BAR_UPDATE_INTERVAL] = s.seekBarUpdateInterval
         prefs[SettingsKeys.SHOW_WAVEFORM] = s.showWaveform
         prefs[SettingsKeys.SHOW_VOLUME_BAR] = s.showVolumeBar
+        prefs[SettingsKeys.SEEK_CAPSULE_ENABLED] = s.seekCapsuleEnabled
+        prefs[SettingsKeys.SEEK_CAPSULE_STYLE] = s.seekCapsuleStyle
+        prefs[SettingsKeys.SEEK_UNPLAYED_ENABLED] = s.seekUnplayedEnabled
+        prefs[SettingsKeys.SEEK_UNPLAYED_STYLE] = s.seekUnplayedStyle
+        prefs[SettingsKeys.SEEK_TIP_ENABLED] = s.seekTipEnabled
+        prefs[SettingsKeys.SEEK_TIP_STYLE] = s.seekTipStyle
+        prefs[SettingsKeys.SEEK_TIP_BAR_SCALE] = s.seekTipBarScale
+        prefs[SettingsKeys.SEEK_TIP_SIZE] = s.seekTipSize
+        prefs[SettingsKeys.SEEK_THICKEN_ON_DRAG] = s.seekThickenOnDrag
 
         prefs[SettingsKeys.QUEUE_SHOW_MINI_PLAYER] = s.queueShowMiniPlayer
         prefs[SettingsKeys.QUEUE_SWIPE_FROM_HOME] = s.queueSwipeFromHome
@@ -762,6 +824,7 @@ object SettingsBackup {
         prefs[SettingsKeys.ANIMATED_COLOR_SOURCE] = s.animatedColorSource
         prefs[SettingsKeys.ANIMATED_BG_DARKNESS] = s.animatedBgDarkness
         prefs[SettingsKeys.ANIMATED_COLOR_PATTERN] = s.animatedColorPattern
+        prefs[SettingsKeys.ANIMATED_EXTRACT_PATTERN] = s.animatedExtractPattern
         prefs[SettingsKeys.FAVORITE_SHOW_ITEM] = s.favoriteShowItem
         prefs[SettingsKeys.FAVORITE_DISPLAY_MODE] = s.favoriteDisplayMode
         prefs[SettingsKeys.FAVORITE_GRID_COLUMNS] = s.favoriteGridColumns
@@ -807,6 +870,9 @@ data class MediaState(
     // 動的アニメーション背景専用: 複数Swatchをpopulation加重で混色した色
     // （dominantColorは従来通り単一Swatchのアクセントカラーとして維持）
     val blendedArtColor: Color = Color(0xFF6200EE),
+    val artMeshColors: List<Color> = emptyList(),
+    // 5パターン分の抽出結果（index 0〜4 = パターン1〜5）。選択は設定側で行う
+    val artMeshPalettes: List<List<Color>> = emptyList(),
     val packageName: String = "",
     val appLabel: String = "",
     val isSpatialAudio: Boolean = false,
